@@ -11,7 +11,7 @@ FROM python:3.12-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 RUST_MCP_MODE=off \
     MCPGATEWAY_SKIP_MIGRATIONS=true
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 curl ca-certificates libmagic1 gcc libpq-dev && \
+    libpq5 curl ca-certificates libmagic1 gcc libc6-dev libpq-dev && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE MANIFEST.in ./
