@@ -23,6 +23,6 @@ COPY --from=assets /build/mcpgateway/static/ mcpgateway/static/
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     && BUILD_UI_ASSETS=false python -m pip install --no-cache-dir ".[redis,postgres,plugins]" \
     && chmod +x docker-entrypoint.sh run-gunicorn.sh run.sh \
-    && python -c "import mcpgateway.bootstrap_db; import mcpgateway.main"
+    && python -m compileall -q mcpgateway plugins
 EXPOSE 4444
 CMD ["./docker-entrypoint.sh"]
