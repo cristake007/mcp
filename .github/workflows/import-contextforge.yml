@@ -1,0 +1,46 @@
+name: Import ContextForge runtime
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/import-contextforge.yml
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout destination
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Fetch upstream pinned source
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/IBM/mcp-context-forge.git /tmp/contextforge
+          git -C /tmp/contextforge checkout 520a7b98712f066075d6a704624fbb3dee76a69c
+      - name: Copy runtime and build assets only
+        run: |
+          set -eu
+          UP=/tmp/contextforge
+          mkdir -p mcpgateway plugins scripts
+          rsync -a --delete --exclude='__pycache__/' "$UP/mcpgateway/" mcpgateway/
+          rsync -a --delete "$UP/plugins/" plugins/
+          rsync -a --delete "$UP/scripts/" scripts/
+          for f in pyproject.toml uv.lock package.json package-lock.json postcss.config.js vite.config.js MANIFEST.in gunicorn.config.py docker-entrypoint.sh run-gunicorn.sh run.sh mcp-catalog.yml; do
+            cp "$UP/$f" "$f"
+          done
+          # Include the upstream production Containerfile for accurate build provenance.
+          cp "$UP/Containerfile" Containerfile.upstream
+          cp "$UP/.dockerignore" .dockerignore.upstream
+          printf '%s\n' 'Upstream source: IBM/mcp-context-forge' 'Commit: 520a7b98712f066075d6a704624fbb3dee76a69c' 'Imported runtime directories: mcpgateway/, plugins/, scripts/' 'Not imported: tests, Ansible, Cargo/Rust crates, benchmarks, Helm, infrastructure samples.' > UPSTREAM_SOURCE.txt
+      - name: Commit imported files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mcpgateway plugins scripts pyproject.toml uv.lock package.json package-lock.json postcss.config.js vite.config.js MANIFEST.in gunicorn.config.py docker-entrypoint.sh run-gunicorn.sh run.sh mcp-catalog.yml Containerfile.upstream .dockerignore.upstream UPSTREAM_SOURCE.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "Import pinned ContextForge Python runtime and UI sources"
+            git push
+          fi
