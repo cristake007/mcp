@@ -1,0 +1,2008 @@
+# -*- coding: utf-8 -*-
+"""Location: ./mcpgateway/routers/oauth_router.py
+Copyright contributors to the MCP-CONTEXT-FORGE project
+SPDX-License-Identifier: Apache-2.0
+
+OAuth Router for ContextForge.
+
+This module handles OAuth 2.0 Authorization Code flow endpoints including:
+- Initiating OAuth flows
+- Handling OAuth callbacks
+- Token management
+"""
+
+# Standard
+import asyncio
+from html import escape
+import json
+import logging
+import re
+import secrets
+from typing import Annotated, Any, Dict, Optional
+from urllib.parse import urlparse
+
+# Third-Party
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+# First-Party
+from mcpgateway.auth import normalize_token_teams
+from mcpgateway.auth_context import get_user_email
+from mcpgateway.common.query_params import QueryErrorCode
+from mcpgateway.common.validators import SecurityValidator
+from mcpgateway.config import settings
+from mcpgateway.db import Gateway, get_db, Permissions
+from mcpgateway.middleware.rbac import get_current_user_with_permissions, require_permission
+from mcpgateway.middleware.token_scoping import ResourceOwnershipResult, token_scoping_middleware
+from mcpgateway.schemas import EmailUserResponse
+from mcpgateway.services.dcr_service import DcrError, DcrService
+from mcpgateway.services.encryption_service import protect_oauth_config_for_storage
+from mcpgateway.services.oauth_manager import OAuthError, OAuthManager
+from mcpgateway.services.team_management_service import TeamManagementService
+from mcpgateway.services.token_storage_service import TokenStorageService
+from mcpgateway.services.gateway_service import GatewayToolNameConflictError
+
+# First-Party - CSP nonce support
+from mcpgateway.utils.csp_nonce import get_csp_nonce_from_request
+from mcpgateway.utils.log_sanitizer import sanitize_for_log
+from mcpgateway.utils.oauth_resource import derive_resource_origin
+from mcpgateway.utils.origin import is_allowed_redirect, origin_from_url
+from mcpgateway.utils.paths import resolve_root_path
+from mcpgateway.utils.verify_credentials import get_auth_header_value
+
+logger = logging.getLogger(__name__)
+
+ADMIN_CSRF_COOKIE_NAME = "mcpgateway_csrf_token"
+ADMIN_CSRF_HEADER_NAME = "x-csrf-token"
+GRANT_TYPE_TOKEN_EXCHANGE = "token-exchange"  # nosec B105 - OAuth grant-type constant, not a credential
+
+
+def _build_user_context(current_user: dict[str, Any] | EmailUserResponse | None, db: Session | None = None) -> dict:
+    """Build user_context dict for TokenStorageService from authenticated user.
+
+    OAuth token storage path selection:
+    ┌───────────┬────────────────────────────┬───────────────────────┐
+    │ Flow      │ token_teams (DB-resolved)  │ Storage path          │
+    ├───────────┼────────────────────────────┼───────────────────────┤
+    │ Normal    │ ["eng", ...]               │ vault/oauth/eng/      │
+    ├───────────┼────────────────────────────┼───────────────────────┤
+    │ Revoked   │ [] (revoked in DB)         │ vault/oauth/shared/   │
+    ├───────────┼────────────────────────────┼───────────────────────┤
+    │ Admin     │ None (bypass)              │ jwt_teams_claim hint  │
+    │           │   + jwt_teams_claim=["e"]  │ → vault/oauth/eng/    │
+    │           │   + jwt_teams_claim=None   │ → vault/oauth/shared/ │
+    ├───────────┼────────────────────────────┼───────────────────────┤
+    │ API       │ teams: []                  │ vault/oauth/shared/   │
+    ├───────────┼────────────────────────────┼───────────────────────┤
+    │ API       │ teams: ["eng"]             │ vault/oauth/eng/      │
+    └───────────┴────────────────────────────┴───────────────────────┘
+
+    SECURITY (CWE-863 fix): For session tokens (token_use="session"), we use
+    ``token_teams`` — the DB-authoritative result of ``resolve_session_teams()``
+    — as the primary path selector.  This ensures that team revocations in the
+    DB take effect immediately: a user removed from a team can no longer store
+    new OAuth tokens under that team's Vault path.
+
+    Admin bypass exception: ``resolve_session_teams()`` returns ``None`` for
+    admin users (admin bypass).  When ``token_teams`` is ``None`` we fall back
+    to ``jwt_teams_claim`` as a *path hint only* (never for permission checks),
+    so that an admin who authorised with ``teams=["engineering"]`` in their JWT
+    still reads from/writes to the ``engineering/`` Vault path rather than the
+    shared path.
+
+    The ``jwt_teams_claim`` field is forwarded by RBAC middleware from
+    ``request.state.jwt_teams_claim`` and is used ONLY for this path-hint
+    fallback, never for access-control decisions.
+
+    Args:
+        current_user: Authenticated user from RBAC middleware (dict) or legacy EmailUserResponse
+        db: Database session (unused - kept for backward compatibility)
+
+    Returns:
+        User context dict with email, teams, is_admin
+    """
+    if not current_user:
+        return {}
+
+    # Handle dict-based current_user (from RBAC middleware)
+    if isinstance(current_user, dict):
+        email = current_user.get("email", "")
+        is_admin = current_user.get("is_admin", False)
+
+        logger.debug("_build_user_context: email=%s, token_use=%s", email, current_user.get("token_use"))
+
+        token_use = current_user.get("token_use")
+        if token_use == "session":  # nosec B105 - token_use type discriminator, not a password
+            # CWE-863 fix: use DB-authoritative token_teams as the primary path
+            # selector so that revoked team memberships take effect immediately.
+            # token_teams is the result of resolve_session_teams() which intersects
+            # the JWT teams claim against current DB membership.
+            token_teams = current_user.get("token_teams")
+            if isinstance(token_teams, list) and token_teams:
+                filtered = [t for t in token_teams if t and isinstance(t, str)]
+                if filtered:
+                    return {"email": email, "teams": filtered, "is_admin": is_admin}
+
+            # token_teams is None (admin bypass) or [] (revoked/public-only).
+            # For admins (None): fall back to jwt_teams_claim as a path hint so
+            # the admin reads from the correct team-scoped Vault path.
+            # For revoked/public ([]): fall through to shared path — correct.
+            if token_teams is None:
+                jwt_teams_claim = current_user.get("jwt_teams_claim")
+                if jwt_teams_claim and isinstance(jwt_teams_claim, list):
+                    filtered = [t for t in jwt_teams_claim if t and isinstance(t, str)]
+                    if filtered:
+                        return {"email": email, "teams": filtered, "is_admin": is_admin}
+
+            # No usable team → shared path (Admin UI sessions, public-only tokens)
+            return {"email": email, "teams": None, "is_admin": is_admin}
+
+        # API / legacy token: use RBAC-resolved token_teams directly.
+        # - token_teams missing or []  → shared path (None)
+        # - token_teams = ["eng", ...] → team-scoped path
+        teams = current_user.get("token_teams")
+        if isinstance(teams, list):
+            teams = [t for t in teams if t and isinstance(t, str)] or None
+
+        return {
+            "email": email,
+            "teams": teams,
+            "is_admin": is_admin,
+        }
+
+    # Handle object-based current_user (legacy EmailUserResponse)
+    return {
+        "email": getattr(current_user, "email", ""),
+        "teams": getattr(current_user, "teams", []),
+        "is_admin": getattr(current_user, "is_admin", False),
+    }
+
+
+async def enforce_fetch_tools_csrf(request: Request) -> None:
+    """Validate admin CSRF token for OAuth fetch-tools mutations.
+
+    Also enforces same-origin via Origin/Referer header check to prevent
+    cross-site request forgery on this state-changing endpoint.
+    """
+    auth_header = get_auth_header_value(request.headers) or ""
+    scheme, separator, token = auth_header.partition(" ")
+    if separator and scheme.lower() == "bearer" and token.strip():
+        return
+
+    # Same-origin check: require Origin or Referer to match app domain (fail-closed)
+    origin = request.headers.get("origin")
+    referer = request.headers.get("referer")
+    candidate = origin
+    if not candidate and referer:
+        try:
+            parsed = urlparse(referer)
+            if parsed.scheme and parsed.netloc:
+                candidate = f"{parsed.scheme}://{parsed.netloc}"
+        except Exception:
+            candidate = None
+
+    if not candidate:
+        # Fail closed: missing Origin/Referer is not allowed for state-changing requests
+        raise HTTPException(status_code=403, detail="CSRF validation failed")
+
+    # Derive the request origin from the already-normalized request.url
+    # (ProxyHeadersMiddleware + ForwardedHostMiddleware run before this handler).
+    # Only trust request.url-derived origin when app_domain is a loopback
+    # address (localhost dev), to prevent X-Forwarded-Host amplification.
+    app_domain = str(settings.app_domain)
+    parsed_app = urlparse(app_domain)
+    app_origin = f"{parsed_app.scheme}://{parsed_app.netloc}"
+    allowed = {app_origin}
+    if parsed_app.hostname in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:  # nosec B104
+        request_origin = f"{request.url.scheme}://{request.url.netloc}"
+        allowed.add(request_origin)
+    allowed.update(settings.csrf_trusted_origins)
+    if candidate not in allowed:
+        raise HTTPException(status_code=403, detail="CSRF validation failed")
+
+    # Double-submit cookie check
+    csrf_cookie = request.cookies.get(ADMIN_CSRF_COOKIE_NAME)
+    csrf_header = request.headers.get(ADMIN_CSRF_HEADER_NAME)
+    if not isinstance(csrf_cookie, str) or not csrf_cookie or not isinstance(csrf_header, str) or not csrf_header:
+        raise HTTPException(status_code=403, detail="CSRF validation failed")
+    if not secrets.compare_digest(csrf_header, csrf_cookie):
+        raise HTTPException(status_code=403, detail="CSRF validation failed")
+
+
+def _default_redirect_uri(request: Optional[Request] = None) -> str:
+    """Build the gateway's own global OAuth callback URL from the configured app domain.
+
+    Pure computation with no side effects, so it is cheap to call unconditionally. Used when
+    a gateway's stored ``oauth_config`` carries no ``redirect_uri`` (API-created or legacy
+    rows), so the authorization-code paths never hand an incomplete credentials dict to
+    :class:`~mcpgateway.services.oauth_manager.OAuthManager`. Callers that substitute this
+    value into OAuth credentials are responsible for logging that substitution -- the
+    authorize path logs at its call site (it must resolve the default before DCR registration
+    runs); the callback path instead passes this as ``default_redirect_uri`` into
+    ``OAuthManager.complete_authorization_code_flow``, whose single centralized guard
+    (``_apply_default_redirect_uri``) logs only when it actually applies it.
+
+    Args:
+        request: The current request, used to resolve a reverse-proxy ``root_path`` (falls
+            back to ``settings.app_root_path`` when omitted or when the scope carries none).
+
+    Returns:
+        Absolute callback URL, e.g. ``https://gateway.example.com/oauth/callback``.
+    """
+    root_path = resolve_root_path(request) if request is not None else str(settings.app_root_path).rstrip("/")
+    # str() of a pydantic HttpUrl appends a trailing slash; rstrip keeps the path single-slashed.
+    return f"{str(settings.app_domain).rstrip('/')}{root_path}/oauth/callback"
+
+
+def _is_well_formed_audience(value: Any) -> bool:
+    """Return True if *value* is a usable audience claim shape.
+
+    Accepts a non-empty string or a non-empty list of non-empty strings; any
+    other shape (None, empty container, mixed types, numbers, dicts) is
+    rejected so a malformed IdP response cannot pollute persisted state.
+
+    Args:
+        value: Candidate audience value pulled from a token claim.
+
+    Returns:
+        ``True`` iff the value is a well-formed audience identifier.
+    """
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return bool(value) and all(isinstance(item, str) and item.strip() for item in value)
+    return False
+
+
+async def _persist_learned_audience(gateway: Gateway, oauth_result: Dict[str, Any], db: Session) -> None:
+    """Learn the IdP's audience identifier from the token and persist it.
+
+    Many IdPs (ServiceNow, Authentik, etc.) do not honor RFC 8707 and set the
+    ``aud`` claim to an abstract identifier (often the ``client_id``) rather than
+    the ``resource`` URL sent in the authorization request.  By persisting the
+    actual ``aud`` value as ``resource`` in the gateway's ``oauth_config``, we
+    ensure that subsequent token validation in ``_validate_audience`` succeeds
+    and that future OAuth requests use the IdP's preferred audience identifier.
+
+    Persistence is **first-write-only**: the learned audience is written only
+    when ``oauth_config["resource"]`` is currently unset.  The OAuth callback
+    path enforces gateway access (read-equivalent) but not ``gateways.update``,
+    so allowing every authenticated callback to overwrite shared gateway
+    configuration would let any user with gateway access mutate global state on
+    behalf of all other users.  To re-learn a stale audience after an IdP
+    change, an admin must clear the ``resource`` field via the gateway update
+    API (which does enforce ``gateways.update``).
+
+    Two additional defensive checks run before any write:
+
+    * **Shape validation** -- the candidate ``token_aud`` must be a non-empty
+      string or non-empty list of non-empty strings.  Anything else (numbers,
+      empty containers, mixed types) is silently dropped so a malformed IdP
+      response cannot pollute persisted state.
+    * **Issuer pinning** -- when ``oauth_config["issuer"]`` is configured, the
+      token's ``iss`` claim must match it.  This prevents a stale or misrouted
+      token from a different AS from injecting an audience for the wrong IdP.
+      The check is skipped when no issuer is configured (preserves existing
+      behavior for non-OIDC / non-discovery setups).
+
+    This is a best-effort operation: opaque tokens, missing ``aud`` claims,
+    malformed shapes, mismatched issuers, and already-set resources are all
+    silently skipped.  Each skip path emits a DEBUG log so operators tracing
+    "audience never learned" reports can distinguish the cause.
+
+    Args:
+        gateway: The gateway ORM object (will be mutated and flushed).
+        oauth_result: The result dict from ``complete_authorization_code_flow``,
+            expected to contain ``token_aud`` and ``token_iss``.
+        db: Active database session.
+
+    Returns:
+        ``None``.  Persistence is a side effect on ``gateway.oauth_config``
+        (mutated in place via reassignment) and the database session
+        (``db.flush()``).
+    """
+    token_aud = oauth_result.get("token_aud")
+    if not _is_well_formed_audience(token_aud):
+        logger.debug("Skipping audience persistence for gateway %s: token_aud absent or malformed", gateway.name)
+        return
+
+    # First-write-only: do not overwrite an existing usable resource.  Empty
+    # strings, empty lists, and lists of empty strings are treated as unset so
+    # an admin can clear the field via the gateway update API to trigger
+    # re-learning on the next callback.  See docstring for the authorization
+    # rationale.
+    oauth_config = gateway.oauth_config or {}
+    if _is_well_formed_audience(oauth_config.get("resource")):
+        logger.debug("Skipping audience persistence for gateway %s: resource already set", gateway.name)
+        return
+
+    # Issuer pinning: refuse to persist an audience drawn from a token whose
+    # iss claim does not match the configured issuer.  Trailing slashes are
+    # stripped for comparison so ``https://idp.example.com`` and
+    # ``https://idp.example.com/`` are treated as equivalent (matches the
+    # convention used by token_validation_service for issuer comparison).
+    # See docstring for the cross-IdP bleed scenario this prevents.
+    configured_issuer = oauth_config.get("issuer")
+    if configured_issuer:
+        token_iss = oauth_result.get("token_iss")
+        if not isinstance(token_iss, str) or token_iss.rstrip("/") != configured_issuer.rstrip("/"):
+            logger.debug(
+                "Skipping audience persistence for gateway %s: token iss does not match configured issuer",
+                gateway.name,
+            )
+            return
+
+    updated_config = dict(oauth_config)
+    updated_config["resource"] = token_aud
+    gateway.oauth_config = updated_config
+    db.flush()
+    logger.info("Learned OAuth audience from IdP token for gateway %s; persisted as resource", gateway.name)
+
+
+def _popup_notification_script(nonce: str, payload: dict) -> str:
+    """Build an inline script that posts the OAuth result to window.opener and closes the popup.
+
+    When the callback page is opened inside a React UI popup, this script communicates
+    the OAuth result to the parent window via postMessage and then closes the popup.
+    When opened via direct navigation (no opener), the script is a no-op and the
+    surrounding HTML page is shown as a fallback.
+
+    Args:
+        nonce: CSP nonce for the inline script tag.
+        payload: Dict to send as the postMessage data.  Values are JSON-encoded
+            with ``<``, ``>``, and ``&`` Unicode-escaped to prevent script injection.
+
+    Returns:
+        HTML ``<script>`` tag string safe for embedding in an HTML body.
+    """
+    safe_payload = (
+        json.dumps(payload)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\\\u2028")  # U+2028 LINE SEPARATOR
+        .replace("\u2029", "\\\\u2029")  # U+2029 PARAGRAPH SEPARATOR
+    )
+    safe_nonce = escape(nonce, quote=True)
+    # targetOrigin is "*" rather than window.location.origin because in production
+    # the API server and the React app may run on different origins (e.g.
+    # api.company.com vs app.company.com).  Using window.location.origin would
+    # cause the browser to silently drop the message.  The receiver mitigates the
+    # reduced targetOrigin restriction by validating event.source === authWindow
+    # (the exact popup reference), so only the window that initiated the flow can
+    # act on the result.
+    return f"<script nonce=\"{safe_nonce}\">(function(){{if(window.opener&&!window.opener.closed){{window.opener.postMessage({safe_payload},'*');window.close();}}}})()</script>"
+
+
+def _popup_callback_response(nonce: str, payload: dict, status_code: int = 200, extra_body: str = "") -> HTMLResponse:
+    """Build the full HTML page wrapping the popup postMessage script for an OAuth callback result.
+
+    Args:
+        nonce: CSP nonce for the inline script tag.
+        payload: Dict to send as the postMessage data (see ``_popup_notification_script``).
+        status_code: HTTP status code for the response.
+        extra_body: Optional extra HTML appended after the script tag (e.g. a visible message).
+
+    Returns:
+        HTMLResponse containing the postMessage script for the popup window.
+    """
+    title = "OAuth Authorization Successful" if payload.get("status") == "success" else "OAuth Authorization Failed"
+    return HTMLResponse(
+        content=(f"<!DOCTYPE html><html><head><title>{title}</title></head><body>" + _popup_notification_script(nonce, payload) + extra_body + "</body></html>"),
+        status_code=status_code,
+    )
+
+
+oauth_router = APIRouter(prefix="/oauth", tags=["oauth"])
+
+
+def _require_admin_user(current_user: EmailUserResponse) -> None:
+    """Require un-narrowed admin context for DCR management endpoints.
+
+    Args:
+        current_user: Authenticated user context from RBAC dependency.
+
+    Raises:
+        HTTPException: If requester is not an admin user or has a narrowed token scope.
+    """
+    is_admin = current_user.is_admin if hasattr(current_user, "is_admin") else current_user.get("is_admin", False)
+    if not is_admin:
+        raise HTTPException(status_code=403, detail="Admin permissions required")
+    token_teams = current_user.token_teams if hasattr(current_user, "token_teams") else current_user.get("token_teams")
+    if token_teams is not None:
+        raise HTTPException(status_code=403, detail="DCR management requires un-narrowed admin access")
+
+
+def _require_unnarrowed_admin(request: Request, current_user: EmailUserResponse) -> None:
+    """Require un-narrowed platform admin for DCR management endpoints.
+
+    Registered OAuth clients are stored globally with no team column, so a
+    team-narrowed admin token has no coherent scope over them. Narrowed and
+    public-only admin sessions are rejected rather than silently granted
+    global visibility.
+
+    Args:
+        request: Incoming request carrying token-scoping state.
+        current_user: Authenticated user context.
+
+    Raises:
+        HTTPException: If the requester is not an admin, or is a narrowed or
+            public-only admin.
+    """
+    _require_admin_user(current_user)
+    if _resolve_token_teams_for_scope_check(request, current_user) is not None:
+        raise HTTPException(status_code=403, detail="OAuth client management requires un-narrowed admin access")
+
+
+def _extract_is_admin(current_user: EmailUserResponse | dict) -> bool:
+    """Extract admin flag from typed or dict user contexts.
+
+    Supports both flat dict structures (``{"is_admin": True}``) and nested
+    structures (``{"user": {"is_admin": True}}``), matching JWT payload formats.
+
+    Args:
+        current_user: Authenticated user context (typed object or dict).
+
+    Returns:
+        ``True`` when the user context indicates admin privileges.
+    """
+    if hasattr(current_user, "is_admin"):
+        return bool(getattr(current_user, "is_admin", False))
+    if isinstance(current_user, dict):
+        user_claim = current_user.get("user", {})
+        user_is_admin = user_claim.get("is_admin", False) if isinstance(user_claim, dict) else False
+        return bool(current_user.get("is_admin", False) or user_is_admin)
+    return False
+
+
+def _recover_token_teams_from_jwt(request: Request) -> tuple[list[str] | None, bool] | None:
+    """Attempt to recover token_teams from cached JWT payload.
+
+    When ``request.state.token_teams`` is missing or malformed, this helper
+    inspects the cached verified JWT payload (set by ``verify_credentials.py``
+    during JWT verification) to re-derive a well-typed ``token_teams`` value
+    and the associated admin flag.
+
+    Returns:
+        Tuple of ``(token_teams, is_admin)`` if recovery succeeds (cached payload
+        exists, is a well-formed tuple, and contains a non-empty dict), ``None``
+        otherwise.  Empty dict payloads are treated as untrusted and fail recovery.
+    """
+    cached = getattr(request.state, "_jwt_verified_payload", None)
+    if not (cached and isinstance(cached, tuple) and len(cached) == 2):
+        return None
+
+    _, payload = cached
+    if not (isinstance(payload, dict) and payload):
+        return None
+
+    # Validate teams claim type before delegating to normalize_token_teams.
+    # normalize_token_teams iterates payload["teams"] without checking it is
+    # iterable; a malformed cached claim (int, bool, str, dict) would raise
+    # TypeError or produce misleading team IDs.  Fail closed: return None so
+    # the caller assigns public-only scope ([]).
+    teams_claim = payload.get("teams")
+    if "teams" in payload and teams_claim is not None and not isinstance(teams_claim, list):
+        logger.warning(
+            "Malformed teams claim in cached JWT payload: expected list or None, got %s",
+            type(teams_claim).__name__,
+        )
+        return None
+
+    token_teams = normalize_token_teams(payload)
+    is_admin = _extract_is_admin(payload)
+
+    return (token_teams, is_admin)
+
+
+def _resolve_token_teams_for_scope_check(request: Request, current_user: EmailUserResponse) -> list[str] | None:
+    """Resolve token teams for scoped ownership checks using normalized token semantics.
+
+    SECURITY: This function must never promote indeterminate scope (missing or
+    malformed ``token_teams``) to unrestricted admin scope.  Only explicitly
+    resolved ``token_teams=None`` from a trusted source (``request.state``,
+    cached JWT payload) may produce unrestricted scope for eligible admins.
+    When no trusted source is available, the function fails closed to
+    public-only (``[]``), matching ``get_token_teams_from_request`` semantics
+    in ``auth_context.py``.
+
+    Args:
+        request: Incoming request with token scoping state.
+        current_user: Authenticated user context.
+
+    Returns:
+        ``None`` for unrestricted admin scope (which callers must downgrade for non-admins),
+        a non-empty list for team-scoped access, or ``[]`` for public-only scope (including
+        fail-closed cases when no trusted source is available).
+    """
+    is_admin = _extract_is_admin(current_user)
+
+    _not_set = object()
+    token_teams = getattr(request.state, "token_teams", _not_set)
+
+    # Fast path: token_teams is already a well-typed value set by auth.py.
+    if token_teams is not _not_set and (token_teams is None or isinstance(token_teams, list)):
+        # Resolved from the primary trusted source — proceed to final checks.
+        pass
+    else:
+        # token_teams is missing (_not_set) or malformed (wrong type).
+        is_malformed = token_teams is not _not_set
+        if is_malformed:
+            logger.warning(
+                "_resolve_token_teams_for_scope_check: malformed token_teams type=%s; attempting recovery from cached JWT payload",
+                type(token_teams).__name__,
+            )
+
+        # Attempt recovery from the cached verified JWT payload.
+        recovered = _recover_token_teams_from_jwt(request)
+        if recovered is not None:
+            token_teams, is_admin = recovered
+            logger.debug(
+                "_resolve_token_teams_for_scope_check: recovered token_teams from cached JWT payload",
+            )
+        else:
+            # No usable cached payload — fail closed to public-only regardless
+            # of admin status.  Unrestricted scope requires an explicit signal from
+            # a trusted source, not an absence of any signal.
+            if is_malformed:
+                logger.warning(
+                    "_resolve_token_teams_for_scope_check: malformed token_teams with no cached JWT payload; failing closed to public-only scope",
+                )
+            token_teams = []
+
+    # Empty-team scoped tokens are public-only and must never receive admin bypass.
+    if isinstance(token_teams, list) and len(token_teams) == 0:
+        is_admin = False
+
+    if is_admin and token_teams is None:
+        return None
+    return token_teams
+
+
+async def _enforce_gateway_access(
+    gateway_id: str,
+    gateway: Gateway,
+    current_user: EmailUserResponse,
+    db: Session,
+    request: Request | None = None,
+) -> None:
+    """Enforce gateway visibility and ownership checks for OAuth endpoints.
+
+    .. note::
+        ``TeamManagementService.get_user_role_in_team()`` may commit the
+        database session (``db.commit()``) on a cache miss to release the idle
+        transaction.  Callers must not rely on uncommitted ORM state being
+        preserved across this call.
+
+    Args:
+        gateway_id: Gateway identifier used for scoped ownership checks.
+        gateway: Gateway record being accessed.
+        current_user: Authenticated requester context.
+        db: Active database session.
+        request: Optional request carrying token-scoping context.
+
+    Raises:
+        HTTPException: If authentication is missing or access is not permitted.
+    """
+    requester_email = get_user_email(current_user)
+    if requester_email == "unknown" or not requester_email.strip():
+        raise HTTPException(status_code=401, detail="User authentication required")
+    # Normalize so comparisons against gateway_owner (also stripped/lowercased below) are case- and whitespace-insensitive
+    requester_email = requester_email.strip().lower()
+
+    requester_is_admin = _extract_is_admin(current_user)
+
+    if request is not None:
+        token_teams = _resolve_token_teams_for_scope_check(request, current_user)
+        if token_teams is None:
+            if requester_is_admin:
+                return
+            token_teams = []
+
+        if (
+            token_scoping_middleware._check_resource_team_ownership(
+                f"/gateways/{gateway_id}",
+                token_teams,
+                db=db,
+                _user_email=requester_email,
+                preloaded_gateway=gateway,
+            )
+            is not ResourceOwnershipResult.ALLOWED
+        ):
+            raise HTTPException(status_code=403, detail="You don't have access to this gateway")
+
+    if requester_is_admin:
+        return
+
+    visibility = str(getattr(gateway, "visibility", "team") or "team").lower()
+    gateway_owner = getattr(gateway, "owner_email", None)
+    gateway_team_id = getattr(gateway, "team_id", None)
+
+    if visibility == "public":
+        return
+
+    # Use TeamManagementService.get_user_role_in_team() which checks the role cache
+    # (auth_cache.get_user_role) before hitting the DB. This avoids the broken
+    # user.is_team_member() path where EmailAuthService.get_user_by_email() returns a
+    # cache-reconstructed detached EmailUser with empty team_memberships.
+    if visibility == "team":
+        if not gateway_team_id:
+            raise HTTPException(status_code=403, detail="You don't have access to this gateway")
+        role = await TeamManagementService(db).get_user_role_in_team(requester_email, gateway_team_id)
+        if not role:
+            raise HTTPException(status_code=403, detail="You don't have access to this gateway")
+        return
+
+    if visibility in {"private", "user"}:
+        if gateway_owner and gateway_owner.strip().lower() == requester_email:
+            return
+        raise HTTPException(status_code=403, detail="You don't have access to this gateway")
+
+    if gateway_owner and gateway_owner.strip().lower() == requester_email:
+        return
+    if gateway_team_id:
+        role = await TeamManagementService(db).get_user_role_in_team(requester_email, gateway_team_id)
+        if role:
+            return
+
+    raise HTTPException(status_code=403, detail="You don't have access to this gateway")
+
+
+@oauth_router.get("/authorize/{gateway_id}")
+async def initiate_oauth_flow(
+    gateway_id: str,
+    request: Request,
+    current_user: EmailUserResponse = Depends(get_current_user_with_permissions),
+    db: Session = Depends(get_db),
+    popup: bool = Query(
+        default=False,
+        description="Set by the React UI when opening OAuth in a popup window; encodes a popup. prefix in the state token so the callback responds with postMessage instead of a full HTML page",
+    ),
+) -> RedirectResponse:  # noqa: ARG001
+    """Initiates the OAuth 2.0 Authorization Code flow for a specified gateway.
+
+    This endpoint retrieves the OAuth configuration for the given gateway, validates that
+    the gateway supports the Authorization Code flow, and redirects the user to the OAuth
+    provider's authorization URL to begin the OAuth process.
+
+    **Phase 1.4: DCR Integration**
+    If the gateway has an issuer but no client_id, and DCR is enabled, this endpoint will
+    automatically register the gateway as an OAuth client with the Authorization Server
+    using Dynamic Client Registration (RFC 7591).
+
+    Args:
+        gateway_id: The unique identifier of the gateway to authorize.
+        request: The FastAPI request object.
+        current_user: The authenticated user initiating the OAuth flow.
+        db: The database session dependency.
+        popup: Indicates if the OAuth flow is initiated in a popup window.
+
+    Returns:
+        A redirect response to the OAuth provider's authorization URL.
+
+    Raises:
+        HTTPException: If the gateway is not found, not configured for OAuth, or not using
+            the Authorization Code flow. If an unexpected error occurs during the initiation process.
+
+    Examples:
+        >>> import asyncio
+        >>> asyncio.iscoroutinefunction(initiate_oauth_flow)
+        True
+    """
+    try:
+        # Get gateway configuration
+        gateway = db.execute(select(Gateway).where(Gateway.id == gateway_id)).scalar_one_or_none()
+
+        if not gateway:
+            raise HTTPException(status_code=404, detail="Gateway not found")
+
+        await _enforce_gateway_access(gateway_id, gateway, current_user, db, request=request)
+
+        if not gateway.oauth_config:
+            raise HTTPException(status_code=400, detail="Gateway is not configured for OAuth")
+
+        if gateway.oauth_config.get("grant_type") != "authorization_code":
+            raise HTTPException(status_code=400, detail="Gateway is not configured for Authorization Code flow")
+
+        oauth_config = gateway.oauth_config.copy()  # Work with a copy to avoid mutating the original
+
+        # RFC 8707: Set the outbound `resource` parameter for the IdP request.
+        # Admin-configured `oauth_config.resource` takes precedence; otherwise
+        # derive the gateway URL's *origin* (not full path) since most OAuth
+        # providers issue tokens with origin-level audiences.  This value is
+        # request-local — the DCR persist block below deliberately strips it
+        # before writing to shared config, and per-user inbound validation
+        # uses OAuthToken.learned_aud (populated on the callback).
+        if not oauth_config.get("resource"):
+            origin = derive_resource_origin(gateway.url)
+            if origin:
+                oauth_config["resource"] = origin
+
+        # API-created and legacy configs may carry no redirect_uri; OAuthManager's PKCE
+        # paths index it directly, so default it here (before DCR, so registration and
+        # the authorization request agree on the callback). Resolved eagerly here --
+        # rather than deferred to OAuthManager's centralized guard like the callback path
+        # below -- because DCR registration (a few lines down) needs the concrete value too.
+        if not oauth_config.get("redirect_uri"):
+            oauth_config["redirect_uri"] = _default_redirect_uri(request)
+            logger.info("No redirect_uri configured on gateway OAuth config; defaulting to derived callback %s", oauth_config["redirect_uri"])
+
+        # Phase 1.4: Auto-trigger DCR if credentials are missing
+        # Check if gateway has issuer but no client_id (DCR scenario)
+        issuer = oauth_config.get("issuer")
+        client_id = oauth_config.get("client_id")
+
+        if issuer and not client_id:
+            if settings.dcr_enabled and settings.dcr_auto_register_on_missing_credentials:
+                logger.info(f"Gateway {SecurityValidator.sanitize_log_message(gateway_id)} has issuer but no client_id. Attempting DCR...")
+
+                try:
+                    # Initialize DCR service
+                    dcr_service = DcrService()
+
+                    # Check if client is already registered in database
+                    registered_client = await dcr_service.get_or_register_client(
+                        gateway_id=gateway_id,
+                        gateway_name=gateway.name,
+                        issuer=issuer,
+                        redirect_uri=oauth_config.get("redirect_uri"),
+                        scopes=oauth_config.get("scopes", settings.dcr_default_scopes),
+                        db=db,
+                    )
+
+                    logger.info(f"✅ DCR successful for gateway {SecurityValidator.sanitize_log_message(gateway_id)}: client_id={SecurityValidator.sanitize_log_message(registered_client.client_id)}")
+
+                    # Decrypt the client secret for use in OAuth flow (if present - public clients may not have secrets)
+                    decrypted_secret = None
+                    if registered_client.client_secret_encrypted:
+                        # First-Party
+                        from mcpgateway.services.encryption_service import get_encryption_service
+
+                        encryption = get_encryption_service(settings.auth_encryption_secret)
+                        decrypted_secret = await encryption.decrypt_secret_async(registered_client.client_secret_encrypted)
+
+                    # Update oauth_config with registered credentials
+                    oauth_config["client_id"] = registered_client.client_id
+                    if decrypted_secret:
+                        oauth_config["client_secret"] = decrypted_secret
+                    # Include token_endpoint_auth_method from DCR registration
+                    oauth_config["token_endpoint_auth_method"] = registered_client.token_endpoint_auth_method
+
+                    # Discover AS metadata to get authorization/token endpoints if not already set
+                    # Note: OAuthManager expects 'authorization_url' and 'token_url', not 'authorization_endpoint'/'token_endpoint'
+                    if not oauth_config.get("authorization_url") or not oauth_config.get("token_url"):
+                        metadata = await dcr_service.discover_as_metadata(issuer)
+                        oauth_config["authorization_url"] = metadata.get("authorization_endpoint")
+                        oauth_config["token_url"] = metadata.get("token_endpoint")
+                        logger.info(f"Discovered OAuth endpoints for {issuer}")
+
+                    # Persist only DCR-derived fields (client credentials + AS metadata) —
+                    # deliberately strip the request-local `resource` derivation before
+                    # writing to shared config. This route enforces gateway *access* but
+                    # not gateways.update, so persisting the auto-derived resource would
+                    # let any authenticated caller pin the shared audience for all users
+                    # — the same RBAC-bypass class of bug the callback-path redesign
+                    # eliminated by moving learned audience to OAuthToken.learned_aud.
+                    # Admin-configured resource (present in gateway.oauth_config before
+                    # this request) is preserved as-is.
+                    persist_dict = dict(oauth_config)
+                    stored_resource = (gateway.oauth_config or {}).get("resource")
+                    if stored_resource is None:
+                        persist_dict.pop("resource", None)
+                    else:
+                        persist_dict["resource"] = stored_resource
+                    gateway.oauth_config = await protect_oauth_config_for_storage(persist_dict, existing_oauth_config=gateway.oauth_config)
+                    gateway.auth_type = "oauth"  # Ensure auth_type is set for OAuth-protected servers
+                    db.commit()
+
+                    logger.info(f"Updated gateway {SecurityValidator.sanitize_log_message(gateway_id)} with DCR credentials and auth_type=oauth")
+
+                except DcrError as dcr_err:
+                    logger.error(f"DCR failed for gateway {SecurityValidator.sanitize_log_message(gateway_id)}: {dcr_err}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Dynamic Client Registration failed. Please configure client_id and client_secret manually or check your OAuth server supports RFC 7591.",
+                    )
+                except Exception as dcr_ex:
+                    logger.error(f"Unexpected error during DCR for gateway {SecurityValidator.sanitize_log_message(gateway_id)}: {dcr_ex}")
+                    raise HTTPException(status_code=500, detail="Failed to register OAuth client")
+            else:
+                # DCR is disabled or auto-register is off
+                logger.warning(f"Gateway {SecurityValidator.sanitize_log_message(gateway_id)} has issuer but no client_id, and DCR auto-registration is disabled")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Gateway OAuth configuration is incomplete. Please provide client_id and client_secret, or enable DCR (Dynamic Client Registration) by setting MCPGATEWAY_DCR_ENABLED=true and MCPGATEWAY_DCR_AUTO_REGISTER_ON_MISSING_CREDENTIALS=true",
+                )
+
+        # Validate required fields for OAuth flow
+        if not oauth_config.get("client_id"):
+            raise HTTPException(status_code=400, detail="OAuth configuration missing client_id")
+
+        # Initiate OAuth flow with user context (now includes PKCE from existing implementation)
+        requester_email = get_user_email(current_user)
+        # Filter out "unknown" sentinel - OAuth requires a real user identity
+        if requester_email == "unknown":
+            requester_email = None
+        user_context = _build_user_context(current_user, db=db)
+
+        oauth_manager = OAuthManager(token_storage=TokenStorageService(db, user_context))
+        auth_data = await oauth_manager.initiate_authorization_code_flow(gateway_id, oauth_config, app_user_email=requester_email, popup=popup)
+
+        logger.info(f"Initiated OAuth flow for gateway {SecurityValidator.sanitize_log_message(gateway_id)} by user {SecurityValidator.sanitize_log_message(requester_email)}")
+
+        # Redirect user to OAuth provider
+        return RedirectResponse(url=auth_data["authorization_url"])
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to initiate OAuth flow: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to initiate OAuth flow")
+
+
+@oauth_router.get("/callback")
+async def oauth_callback(
+    request: Request,
+    # NOTE on validation strategy for OAuth callback parameters:
+    # - RFC 6749 defines `code` and `state` as opaque VSCHAR (%x20-7E) strings.
+    #   Tight allow-lists (e.g. only [a-zA-Z0-9_-]) break Google (uses `/`), Microsoft
+    #   (uses `!*%`), and our own session-bound state (uses `.` separator). Keep length
+    #   caps but no pattern. Downstream token exchange & HMAC verification do the real
+    #   validation.
+    # - `error` is a small, well-defined RFC 6749 Section 4.1.2.1 enum-like value.
+    # - `error_description` is human-readable free text per RFC 6749 Section 5.2.
+    code: Annotated[str | None, Query(max_length=2048, description="Authorization code from OAuth provider")] = None,
+    state: Annotated[str | None, Query(max_length=2048, description="State parameter for CSRF protection")] = None,
+    error: QueryErrorCode = None,
+    error_description: Annotated[str | None, Query(max_length=500, description="OAuth provider error description")] = None,
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    """Handle the OAuth callback and complete the authorization process.
+
+    This endpoint is called by the OAuth provider after the user authorizes access.
+    It receives the authorization code and state parameters, verifies the state,
+    retrieves the corresponding gateway configuration, and exchanges the code for an access token.
+
+    Args:
+        code (str): The authorization code returned by the OAuth provider.
+        state (str): The state parameter for CSRF protection, which encodes the gateway ID.
+        error (str): OAuth provider error code from error callback (RFC 6749 Section 4.1.2.1).
+        error_description (str): OAuth provider error description.
+        request (Request): The incoming HTTP request object.
+        db (Session): The database session dependency.
+
+    Returns:
+        HTMLResponse: An HTML response indicating the result of the OAuth authorization process.
+
+    Raises:
+        ValueError: Raised internally when state parameter is missing gateway_id (caught and handled).
+
+    Examples:
+        >>> import asyncio
+        >>> asyncio.iscoroutinefunction(oauth_callback)
+        True
+    """
+
+    # Determine early whether this callback was initiated from the React UI popup.
+    # The authorize endpoint prefixes the state token with "popup." when popup=True,
+    # so we can detect it here without any additional storage lookups.
+    is_popup = bool(state and isinstance(state, str) and state.startswith("popup."))
+    csp_nonce = get_csp_nonce_from_request(request)
+
+    try:
+        # Get root path for URL construction
+        root_path = resolve_root_path(request) if request else ""
+        safe_root_path = escape(str(root_path), quote=True)
+
+        # RFC 6749 Section 4.1.2.1: provider may return error instead of code
+        if error:
+            error_text = escape(error)
+            description_text = escape(error_description or "OAuth provider returned an authorization error.")
+            # Sanitize untrusted query parameters before logging to prevent log injection
+            logger.warning(f"OAuth provider returned error callback: error={sanitize_for_log(error)}, description={sanitize_for_log(error_description)}")
+            if is_popup:
+                return _popup_callback_response(
+                    csp_nonce,
+                    {"type": "oauth_callback", "status": "error", "error": error, "errorDescription": error_description or "OAuth provider returned an authorization error."},
+                    status_code=400,
+                )
+            return HTMLResponse(
+                content=f"""
+                <!DOCTYPE html>
+                <html>
+                <head><title>OAuth Authorization Failed</title></head>
+                <body>
+                    <h1>❌ OAuth Authorization Failed</h1>
+                    <p><strong>Error:</strong> {error_text}</p>
+                    <p><strong>Description:</strong> {description_text}</p>
+                    <a href="{safe_root_path}/admin#gateways">Return to Admin Panel</a>
+                </body>
+                </html>
+                """,
+                status_code=400,
+            )
+
+        if not code:
+            logger.warning("OAuth callback missing authorization code")
+            if is_popup:
+                return _popup_callback_response(
+                    csp_nonce, {"type": "oauth_callback", "status": "error", "error": "missing_code", "errorDescription": "Missing authorization code in callback response."}, status_code=400
+                )
+            return HTMLResponse(
+                content=f"""
+                <!DOCTYPE html>
+                <html>
+                <head><title>OAuth Authorization Failed</title></head>
+                <body>
+                    <h1>❌ OAuth Authorization Failed</h1>
+                    <p>Error: Missing authorization code in callback response.</p>
+                    <a href="{safe_root_path}/admin#gateways">Return to Admin Panel</a>
+                </body>
+                </html>
+                """,
+                status_code=400,
+            )
+
+        def _invalid_state_response() -> HTMLResponse:
+            """Return an HTML error page for invalid or missing OAuth state.
+
+            Returns:
+                HTMLResponse: A 400 error page describing the invalid state.
+            """
+            if is_popup:
+                return _popup_callback_response(
+                    csp_nonce, {"type": "oauth_callback", "status": "error", "error": "invalid_state", "errorDescription": "Invalid OAuth state parameter."}, status_code=400
+                )
+            return HTMLResponse(
+                content=f"""
+                <!DOCTYPE html>
+                <html>
+                <head><title>OAuth Authorization Failed</title></head>
+                <body>
+                    <h1>❌ OAuth Authorization Failed</h1>
+                    <p>Error: Invalid OAuth state parameter.</p>
+                    <a href="{safe_root_path}/admin#gateways">Return to Admin Panel</a>
+                </body>
+                </html>
+                """,
+                status_code=400,
+            )
+
+        if not state:
+            logger.warning("OAuth callback missing state parameter")
+            return _invalid_state_response()
+
+        # SECURITY: Extract gateway_id without consuming state (no TOCTOU risk - just for lookup)
+        # complete_authorization_code_flow will atomically validate/consume state and return state_data
+        temp_user_context = _build_user_context(getattr(request.state, "user", None)) if request and hasattr(request, "state") else {}
+        temp_oauth_manager = OAuthManager(token_storage=TokenStorageService(db, temp_user_context))
+
+        # Extract gateway_id without consuming state
+        gateway_id = await temp_oauth_manager.resolve_gateway_id_from_state(state, allow_legacy_fallback=False)
+        if not gateway_id:
+            logger.warning("OAuth callback received invalid or unknown state token")
+            return _invalid_state_response()
+
+        # Get gateway configuration (before consuming state, to validate OAuth config exists)
+        gateway = db.execute(select(Gateway).where(Gateway.id == gateway_id)).scalar_one_or_none()
+
+        if not gateway:
+            logger.warning("OAuth callback state resolved to unknown gateway id")
+            return _invalid_state_response()
+
+        if not gateway.oauth_config:
+            logger.warning("OAuth callback: no OAuth config in database for gateway %s", gateway_id)
+            return _invalid_state_response()
+
+        # SECURITY FIX (TOCTOU): Complete OAuth code exchange WITHOUT token storage first
+        # This atomically consumes state and returns state_data, eliminating the TOCTOU race
+        # from the previous _peek_state_data() approach
+        no_storage_oauth_manager = OAuthManager(token_storage=None)
+
+        oauth_config_with_resource = gateway.oauth_config.copy()
+        post_oauth_redirect_response = None
+        if not is_popup and "redirect_uri_after_oauth" in oauth_config_with_resource:
+            post_oauth_redirect_response = custom_redirect_after_callback(oauth_config_with_resource["redirect_uri_after_oauth"], 302)
+
+        # RFC 8707: Set resource parameter for the token exchange request.
+        # If resource was previously learned from the IdP's token aud claim, use it as-is.
+        # Otherwise derive from gateway.url for the first authorization request.
+        if not oauth_config_with_resource.get("resource"):
+            origin = derive_resource_origin(gateway.url)
+            if origin:
+                oauth_config_with_resource["resource"] = origin
+
+        # Complete flow WITHOUT storing tokens (atomically returns state_data + token_response).
+        # Pass default_redirect_uri so complete_authorization_code_flow can fall back to it
+        # when no redirect_uri was pinned in state (e.g. state stored before pinning existed).
+        result = await no_storage_oauth_manager.complete_authorization_code_flow(
+            gateway_id,
+            code,
+            state,
+            oauth_config_with_resource,
+            ca_certificate=gateway.ca_certificate,
+            client_cert=gateway.client_cert,
+            client_key=gateway.client_key,
+            default_redirect_uri=_default_redirect_uri(request),
+        )
+
+        # Extract state_data from result (was atomically consumed and returned)
+        state_data = result.get("state_data", {})
+        app_user_email = state_data.get("app_user_email")
+        team_id = state_data.get("team_id")
+        logger.info(f"OAuth callback: extracted team_id={team_id} from state_data for user {app_user_email}")
+
+        # SECURITY (CWE-287): Hard-fail if user identity cannot be bound.
+        # State is already consumed at this point; a missing email means no token
+        # can be stored and the user would see "success" with nothing stored —
+        # a silent no-op that burns the one-time state and leaves the user stuck.
+        if not app_user_email:
+            logger.error("OAuth callback: cannot bind token — no user identity in state (state already consumed). User must re-authorize.")
+            return _invalid_state_response()
+
+        # Now build properly-scoped TokenStorageService with team_id from state
+        # SECURITY: Use team_id from OAuth state (which came from original token scope)
+        #
+        # Token storage path mapping:
+        # - team_id present → teams=[team_id] → vault/oauth/{team_id}/...
+        # - team_id is None → teams=None → vault/oauth/shared/...
+        user_context = {
+            "email": app_user_email or "",
+            "teams": [team_id] if team_id else None,  # None = shared path
+            "is_admin": False,  # Callback doesn't have admin context from state
+        }
+
+        token_storage = TokenStorageService(db, user_context)
+
+        # Store the tokens we just obtained
+        # Token's aud/iss claims (best-effort, unverified) are persisted per-user by
+        # TokenStorageService.store_tokens as OAuthToken.learned_aud / learned_iss so
+        # subsequent validation can be authoritative for THIS USER without letting
+        # anyone with gateway access mutate globally-shared gateway config. See
+        # OAuthManager.complete_authorization_code_flow and
+        # token_validation_service._validate_audience for the full trust model.
+        if app_user_email and result.get("success"):
+            from mcpgateway.services.oauth_manager import parse_expires_in  # pylint: disable=import-outside-toplevel
+
+            token_response = result.get("token_response", {})
+            if not token_response or not token_response.get("access_token"):
+                logger.error("OAuth callback: complete_authorization_code_flow succeeded but no access_token in token_response")
+                return _invalid_state_response()
+
+            # Handle scope as either string or list (OAuth providers vary)
+            scope_value = token_response.get("scope", "")
+            if isinstance(scope_value, list):
+                scopes_list = [s for s in scope_value if isinstance(s, str)]
+            elif isinstance(scope_value, str):
+                scopes_list = scope_value.split() if scope_value else []
+            else:
+                scopes_list = []
+
+            # Extract per-user learned audience/issuer from the IdP token response.
+            # These are best-effort (may be None for opaque tokens) and stored per-user
+            # so get_user_learned_audience() returns an authoritative per-user value
+            # rather than falling back to the shared gateway config for all users.
+            token_aud = result.get("token_aud")  # str | list | None
+            token_iss = result.get("token_iss")  # str | None
+
+            await token_storage.store_tokens(
+                gateway_id=gateway_id,
+                user_id=result.get("user_id", ""),
+                app_user_email=app_user_email,
+                access_token=token_response["access_token"],
+                refresh_token=token_response.get("refresh_token"),
+                expires_in=parse_expires_in(token_response),
+                scopes=scopes_list,
+                learned_aud=token_aud,
+                learned_iss=token_iss,
+            )
+
+        # Learn the IdP's audience mapping from the token and persist as resource.
+        # RFC 8707 Section 2: "The authorization server may use the exact resource value
+        # as the audience or it may map from that value to a more general URI or abstract
+        # identifier for the given resource."  We persist whatever the IdP chose so that
+        # subsequent token validation matches.
+        await _persist_learned_audience(gateway, result, db)
+
+        logger.info(f"Completed OAuth flow for gateway {SecurityValidator.sanitize_log_message(gateway_id)}, user {SecurityValidator.sanitize_log_message(str(result.get('user_id')))}")
+
+        # React UI popup: post result to parent window and close.
+        if is_popup:
+            return _popup_callback_response(
+                csp_nonce,
+                {"type": "oauth_callback", "status": "success", "gatewayId": str(gateway_id), "gatewayName": str(gateway.name)},
+                extra_body="<p>Authorization successful. This window will close automatically.</p>",
+            )
+
+        # Create a temporary session JWT (5 minutes) for the fetch-tools page.
+        # For non-admins: scoped to team_id from the OAuth state (or shared if team_id is None).
+        # For admins: RBAC resolves this to None (admin bypass via resolve_session_teams) as
+        # expected — the raw jwt_teams_claim is used separately by _build_user_context() for
+        # Vault path selection so the correct team-scoped path is preserved for admins too.
+        # First-Party
+        from mcpgateway.utils.create_jwt_token import create_jwt_token
+
+        jwt_payload = {
+            "email": app_user_email,
+            "token_use": "session",  # nosec B105 - token_use type discriminator, not a password
+            "jti": secrets.token_urlsafe(16),
+        }
+        # S8: When team_id is None (Admin-UI session, no team scope), omit the
+        # `teams` key entirely so the JWT has no teams claim.  Passing `teams=[]`
+        # serialises as `"teams": []`, which _narrow_by_jwt_teams treats as
+        # "no narrowing requested" and returns full DB membership — broader than
+        # the intended shared/public scope.  Omitting the key leaves
+        # _build_user_context seeing jwt_teams_claim=None → shared path (correct).
+        session_jwt = await create_jwt_token(
+            data=jwt_payload,
+            expires_in_minutes=5,
+            **({"teams": [team_id]} if team_id else {}),
+        )
+
+        # Legacy admin UI: return full page with fetch-tools button.
+        # Generate CSRF token early so it can be embedded in the JS literal
+        csrf_token = request.cookies.get(ADMIN_CSRF_COOKIE_NAME, "")
+        if not isinstance(csrf_token, str) or not re.match(r"^[A-Za-z0-9_=-]{32,}$", csrf_token):
+            csrf_token = secrets.token_urlsafe(32)
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>OAuth Authorization Successful</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                .success {{ color: #059669; }}
+                .error {{ color: #dc2626; }}
+                .info {{ color: #2563eb; }}
+                .button {{
+                    display: inline-block;
+                    padding: 10px 20px;
+                    background-color: #3b82f6;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 5px;
+                    margin-top: 20px;
+                    border: none;
+                    cursor: pointer;
+                    font-size: 16px;
+                }}
+                .button:hover {{ background-color: #2563eb; }}
+                .button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
+            </style>
+        </head>
+        <body>
+            <h1 class="success">✅ OAuth Authorization Successful</h1>
+            <div class="info">
+                <p><strong>Gateway:</strong> {escape(str(gateway.name))}</p>
+                <p><strong>User ID:</strong> {escape(str(result.get("user_id", "Unknown")))}</p>
+                <p><strong>Expires:</strong> {escape(str(result.get("expires_at", "Unknown")))}</p>
+                <p><strong>Status:</strong> Authorization completed successfully</p>
+            </div>
+
+            <div style="margin: 30px 0;">
+                <h3>Next Steps:</h3>
+                <p>Now that OAuth authorization is complete, you can fetch tools from the MCP server:</p>
+                <button id="fetch-tools-btn" class="button" style="background-color: #059669;">
+                    🔧 Fetch Tools from MCP Server
+                </button>
+                <div id="fetch-status" style="margin-top: 15px;"></div>
+            </div>
+
+            <a href="{safe_root_path}/admin#gateways" class="button">Return to Admin Panel</a>
+
+            <script nonce="{csp_nonce}">
+            (function() {{
+                try {{
+                    const button = document.getElementById('fetch-tools-btn');
+                    const statusDiv = document.getElementById('fetch-status');
+                    if (!button || !statusDiv) {{
+                        console.error('OAuth success page: required DOM elements missing');
+                        return;
+                    }}
+
+                    button.addEventListener('click', async function() {{
+                        button.disabled = true;
+                        button.textContent = '⏳ Fetching Tools...';
+                        statusDiv.innerHTML = '<p style="color: #2563eb;">Fetching tools from MCP server...</p>';
+
+                        try {{
+                            const response = await fetch('{safe_root_path}/oauth/fetch-tools/{escape(str(gateway_id), quote=True)}', {{
+                                method: 'POST',
+                                credentials: 'include',  // pragma: allowlist secret
+                                headers: {{
+                                    'Accept': 'application/json',
+                                    'X-CSRF-Token': {json.dumps(csrf_token)}
+                                }}
+                            }});
+
+                            const result = await response.json();
+
+                            if (response.ok) {{
+                                statusDiv.innerHTML = `
+                                    <div style="color: #059669; padding: 15px; background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 5px;">
+                                        <h4>✅ Tools Fetched Successfully!</h4>
+                                        <p>${{result.message}}</p>
+                                    </div>
+                                `;
+                                button.textContent = '✅ Tools Fetched';
+                                button.style.backgroundColor = '#059669';
+                            }} else {{
+                                throw new Error(result.detail || 'Failed to fetch tools');
+                            }}
+                        }} catch (error) {{
+                            statusDiv.innerHTML = `
+                                <div style="color: #dc2626; padding: 15px; background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 5px;">
+                                    <h4>❌ Failed to Fetch Tools</h4>
+                                    <p><strong>Error:</strong> ${{error.message}}</p>
+                                    <p>You can still return to the admin panel and try again later.</p>
+                                </div>
+                            `;
+                            button.textContent = '❌ Retry Fetch Tools';
+                            button.style.backgroundColor = '#dc2626';
+                            button.disabled = false;
+                        }}
+                    }});
+                }} catch (initError) {{
+                    console.error('OAuth success page script initialization failed:', initError);
+                }}
+            }})();
+            </script>
+        </body>
+        </html>
+        """
+        response = HTMLResponse(content=html_content)
+        use_secure = (settings.environment == "production") or settings.secure_cookies
+        max_age = max(300, settings.csrf_token_expiry)
+
+        # Set CSRF cookie for form protection
+        response.set_cookie(
+            key=ADMIN_CSRF_COOKIE_NAME,
+            value=csrf_token,
+            max_age=max_age,
+            path=root_path or "/",
+            httponly=False,
+            secure=use_secure,
+            samesite="strict",
+        )
+
+        # Set temporary session JWT cookie for fetch-tools API call
+        # Short-lived (5 minutes) and team-scoped
+        response.set_cookie(
+            key="jwt_token",
+            value=session_jwt,
+            max_age=300,  # 5 minutes
+            path=root_path or "/",
+            httponly=True,
+            secure=use_secure,
+            samesite="strict",
+        )
+
+        if post_oauth_redirect_response is not None:
+            response = post_oauth_redirect_response
+
+        return response
+
+    except OAuthError as e:
+        # CWE-209: log full detail server-side only; never render internal error
+        # strings (which may contain upstream hostnames, token-endpoint URLs, or
+        # raw HTTP response bodies) into the browser-facing HTML page.
+        logger.error("OAuth callback failed: %s", sanitize_for_log(str(e)))
+        _oauth_user_msg = "OAuth authorization failed. Please check your configuration and try again."
+        if is_popup:
+            return _popup_callback_response(
+                csp_nonce,
+                {"type": "oauth_callback", "status": "error", "error": "oauth_error", "errorDescription": _oauth_user_msg},
+                status_code=400,
+            )
+        return HTMLResponse(
+            content=f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>OAuth Authorization Failed</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                .error {{ color: #dc2626; }}
+                .button {{
+                    display: inline-block;
+                    padding: 10px 20px;
+                    background-color: #3b82f6;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 5px;
+                    margin-top: 20px;
+                }}
+                .button:hover {{ background-color: #2563eb; }}
+            </style>
+        </head>
+        <body>
+            <h1 class="error">❌ OAuth Authorization Failed</h1>
+            <p><strong>Error:</strong> {escape(_oauth_user_msg)}</p>
+            <p>Please check your OAuth configuration and try again.</p>
+            <a href="{safe_root_path}/admin#gateways" class="button">Return to Admin Panel</a>
+        </body>
+        </html>
+        """,
+            status_code=400,
+        )
+
+    except Exception as e:
+        # CWE-209: log full detail server-side only.
+        logger.error("Unexpected error in OAuth callback: %s", sanitize_for_log(str(e)))
+        _unexpected_user_msg = "An unexpected error occurred during authorization. Please contact your administrator."
+        if is_popup:
+            return _popup_callback_response(
+                csp_nonce,
+                {"type": "oauth_callback", "status": "error", "error": "server_error", "errorDescription": _unexpected_user_msg},
+                status_code=500,
+            )
+        return HTMLResponse(
+            content=f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>OAuth Authorization Failed</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                .error {{ color: #dc2626; }}
+                .button {{
+                    display: inline-block;
+                    padding: 10px 20px;
+                    background-color: #3b82f6;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 5px;
+                    margin-top: 20px;
+                }}
+                .button:hover {{ background-color: #2563eb; }}
+            </style>
+        </head>
+        <body>
+            <h1 class="error">❌ OAuth Authorization Failed</h1>
+            <p><strong>Unexpected Error:</strong> {escape(_unexpected_user_msg)}</p>
+            <p>Please contact your administrator for assistance.</p>
+            <a href="{safe_root_path}/admin#gateways" class="button">Return to Admin Panel</a>
+        </body>
+        </html>
+        """,
+            status_code=500,
+        )
+
+
+def _validate_post_oauth_redirect(url: str) -> None:
+    """Reject an untrusted post-OAuth redirect target.
+
+    Args:
+        url: Target URL.
+
+    Raises:
+        OAuthError: When the URL matches neither the app origin nor configured external origin.
+    """
+    if not is_allowed_redirect(url, str(settings.app_domain), settings.oauth_redirect_allowed_origin):
+        raise OAuthError(f"redirect_uri_after_oauth must use this gateway origin ({origin_from_url(str(settings.app_domain))}) or the origin in OAUTH_REDIRECT_ALLOWED_ORIGIN")
+
+
+def custom_redirect_after_callback(url: str, status_code: int) -> RedirectResponse:
+    """Validate *url* against trusted redirect origins then return a redirect.
+
+    Args:
+        url: Target URL
+        status_code: HTTP status code for the redirect response.
+
+    Returns:
+        RedirectResponse to url.
+
+    Raises:
+        OAuthError: When an absolute URL matches neither the app origin nor the external allowlist.
+    """
+    _validate_post_oauth_redirect(url)
+    return RedirectResponse(url=url, status_code=status_code, headers={"Referrer-Policy": "no-referrer"})
+
+
+def _token_info_to_status_payload(info: Any) -> Dict[str, Any]:
+    """Convert a ``get_token_info()``/``get_token_info_bulk()`` result into the public ``user_token_status`` shape.
+
+    Three input shapes are distinguished so a backend outage never reads the same as a
+    caller who genuinely never authorized:
+
+    * ``dict`` - a stored token record; its ``status`` field is surfaced as-is.
+    * ``None`` - no token stored for this caller/gateway -> ``"missing"``.
+    * ``Exception`` - the lookup itself failed (DB error, Vault outage, batch timeout)
+      -> ``"unknown"``, so a UI doesn't mistake a transient outage for "never authorized"
+      and prompt a fresh OAuth flow with the IdP.
+
+    Args:
+        info: A token-info dict, ``None``, or a caught ``Exception`` instance.
+
+    Returns:
+        Dict with ``status`` and ``authorized``, plus ``scopes``/``expires_at``/``updated_at``
+        when ``info`` is a dict.
+    """
+    if isinstance(info, BaseException):
+        return {"status": "unknown", "authorized": False}
+    if info is None:
+        return {"status": "missing", "authorized": False}
+    status = info.get("status", "missing")
+    return {
+        "status": status,
+        "authorized": status in ("valid", "near_expiry"),
+        "scopes": info.get("scopes"),
+        "expires_at": info.get("expires_at"),
+        "updated_at": info.get("updated_at"),
+    }
+
+
+async def _get_caller_token_status(db: Session, current_user: Any, gateway_id: str, *, token_storage: Optional[TokenStorageService] = None) -> Dict[str, Any]:
+    """Look up the caller's own OAuth token state for a gateway.
+
+    Wires the already-implemented ``TokenStorageService.get_token_info`` into
+    the status endpoints. Never returns token values - only metadata about
+    whether a token exists and its freshness.
+
+    Args:
+        db: Active database session.
+        current_user: Authenticated requester context (dict or EmailUserResponse).
+        gateway_id: Gateway identifier to look up.
+        token_storage: Optional pre-built ``TokenStorageService`` to reuse across
+            multiple lookups (batch endpoint) instead of constructing a new one
+            per gateway.
+
+    Returns:
+        Dict with ``authorized`` (bool) and ``status`` (one of "missing",
+        "valid", "near_expiry", "expired", "unknown"), plus ``scopes``,
+        ``expires_at`` and ``updated_at`` when a token is stored.
+    """
+    requester_email = get_user_email(current_user)
+    if requester_email == "unknown" or not requester_email.strip():
+        return {"status": "missing", "authorized": False}
+
+    if token_storage is None:
+        token_storage = TokenStorageService(db, _build_user_context(current_user))
+
+    try:
+        info = await token_storage.get_token_info(gateway_id, requester_email)
+    except Exception as e:
+        # The backend already logs its own failure; this ties it to the caller/gateway with a
+        # traceback so a transient lookup failure is distinguishable in logs from a genuinely
+        # missing token - and, via "unknown" below, distinguishable to the client too.
+        logger.exception("OAuth token status lookup failed for gateway=%s user=%s: %s", gateway_id, requester_email, str(e))
+        return _token_info_to_status_payload(e)
+
+    return _token_info_to_status_payload(info)
+
+
+def _build_oauth_status_payload(gateway: Gateway) -> Dict[str, Any]:
+    """Build the OAuth config portion of a gateway's status payload (no I/O).
+
+    Shared by the single-gateway and batch status endpoints so the two never
+    drift. Caller is responsible for gateway lookup, access enforcement, and
+    attaching ``user_token_status`` for ``authorization_code`` grants.
+
+    Args:
+        gateway: Gateway record with ``oauth_config`` already loaded.
+
+    Returns:
+        Dict describing OAuth enablement and, when configured, grant details.
+    """
+    if not gateway.oauth_config:
+        return {"oauth_enabled": False, "message": "Gateway is not configured for OAuth"}
+
+    oauth_config = gateway.oauth_config
+    grant_type = oauth_config.get("grant_type")
+
+    if grant_type == "authorization_code":
+        return {
+            "oauth_enabled": True,
+            "grant_type": grant_type,
+            "client_id": oauth_config.get("client_id"),
+            "scopes": oauth_config.get("scopes", []),
+            "authorization_url": oauth_config.get("authorization_url"),
+            "redirect_uri": oauth_config.get("redirect_uri"),
+            "message": "Gateway configured for Authorization Code flow",
+        }
+
+    return {
+        "oauth_enabled": True,
+        "grant_type": grant_type,
+        "client_id": oauth_config.get("client_id"),
+        "scopes": oauth_config.get("scopes", []),
+        "message": f"Gateway configured for {grant_type} flow",
+    }
+
+
+@oauth_router.get("/status/{gateway_id}")
+@require_permission(Permissions.GATEWAYS_READ)
+async def get_oauth_status(
+    gateway_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_with_permissions),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Get OAuth status for a gateway.
+
+    Requires authentication and authorization to prevent information disclosure
+    about gateway OAuth configuration (client IDs, scopes, etc.).
+
+    For the authorization_code grant, also reports the *caller's own* token
+    state (``user_token_status``), derived from authenticated identity - never
+    a client-supplied user. This is per-caller and never shared across users.
+
+    Args:
+        gateway_id: ID of the gateway
+        current_user: Authenticated user (enforces authentication)
+        db: Database session
+        request: Request with token-scoping context.
+
+    Returns:
+        OAuth status information
+
+    Raises:
+        HTTPException: If not authenticated, not authorized, gateway not found, or error
+    """
+    try:
+        # Get gateway configuration
+        gateway = db.execute(select(Gateway).where(Gateway.id == gateway_id)).scalar_one_or_none()
+
+        if not gateway:
+            raise HTTPException(status_code=404, detail="Gateway not found")
+
+        await _enforce_gateway_access(gateway_id, gateway, current_user, db, request=request)
+
+        payload = _build_oauth_status_payload(gateway)
+        if payload.get("grant_type") == "authorization_code":
+            payload["user_token_status"] = await _get_caller_token_status(db, current_user, gateway_id)
+        return payload
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get OAuth status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get OAuth status")
+
+
+OAUTH_STATUS_BATCH_MAX_IDS = 100
+
+# Upper bound on how long the batch endpoint will wait for the whole
+# get_token_info_bulk() call, so a slow/unresponsive backend (worst case:
+# OAUTH_STATUS_BATCH_MAX_IDS sequential per-id Vault lookups, each retried
+# with exponential backoff) can't hold the request open indefinitely. On
+# timeout every pending id reports "unknown" rather than failing the batch.
+OAUTH_STATUS_BATCH_TOKEN_LOOKUP_TIMEOUT_SECONDS = 15.0
+
+
+@oauth_router.get("/status")
+@require_permission(Permissions.GATEWAYS_READ)
+async def get_oauth_status_batch(
+    request: Request,
+    gateway_ids: Annotated[Optional[list[str]], Query(description="Gateway ids to look up; repeat the parameter for multiple ids")] = None,
+    current_user: dict = Depends(get_current_user_with_permissions),
+    db: Session = Depends(get_db),
+) -> Dict[str, Dict[str, Any]]:
+    """Get OAuth status for multiple gateways in a single call.
+
+    Batched equivalent of ``GET /oauth/status/{gateway_id}`` so a grid of
+    cards (catalog, gateways list) can render caller-scoped OAuth state
+    without issuing one request per card.
+
+    Args:
+        request: Incoming request with token-scoping context.
+        gateway_ids: Gateway identifiers to look up (repeated query param).
+        current_user: Authenticated user (enforces authentication).
+        db: Database session.
+
+    Returns:
+        Mapping of gateway_id to the same payload ``GET /oauth/status/{gateway_id}``
+        returns. Gateway ids that don't exist or aren't visible to the caller
+        are omitted rather than failing the whole batch.
+
+    Raises:
+        HTTPException: If no gateway ids are supplied, or more than
+            ``OAUTH_STATUS_BATCH_MAX_IDS`` are requested at once.
+    """
+    if not gateway_ids:
+        raise HTTPException(status_code=400, detail="gateway_ids is required")
+
+    deduped_ids = list(dict.fromkeys(gateway_ids))  # gateway_ids is non-empty here (checked above)
+    if len(deduped_ids) > OAUTH_STATUS_BATCH_MAX_IDS:
+        raise HTTPException(status_code=400, detail=f"Too many gateway_ids requested (max {OAUTH_STATUS_BATCH_MAX_IDS})")
+
+    # Single query for all requested gateways - the batch route exists specifically
+    # to avoid N+1 round trips.
+    gateways_by_id = {gw.id: gw for gw in db.execute(select(Gateway).where(Gateway.id.in_(deduped_ids))).scalars().all()}
+
+    accessible: Dict[str, Gateway] = {}
+    for gateway_id in deduped_ids:
+        gateway = gateways_by_id.get(gateway_id)
+        if not gateway:
+            # Not found - omit rather than failing the batch.
+            continue
+
+        try:
+            await _enforce_gateway_access(gateway_id, gateway, current_user, db, request=request)
+        except HTTPException as exc:
+            if exc.status_code >= 500:
+                logger.error("OAuth status batch: access check failed for gateway=%s: %s", gateway_id, exc.detail)
+            # Not accessible to this caller (or a lookup failure, logged above) - omit rather than failing the batch.
+            continue
+        except Exception:
+            logger.exception("OAuth status batch: access check raised for gateway=%s", gateway_id)
+            continue
+
+        accessible[gateway_id] = gateway
+
+    results: Dict[str, Dict[str, Any]] = {}
+    auth_code_ids: list[str] = []
+    for gateway_id, gateway in accessible.items():
+        try:
+            payload = _build_oauth_status_payload(gateway)
+        except Exception:
+            logger.exception("OAuth status batch: failed to build status for gateway=%s", gateway_id)
+            continue
+        results[gateway_id] = payload
+        if payload.get("grant_type") == "authorization_code":
+            auth_code_ids.append(gateway_id)
+
+    if not auth_code_ids:
+        return results
+
+    requester_email = get_user_email(current_user)
+    if requester_email == "unknown" or not requester_email.strip():
+        for gateway_id in auth_code_ids:
+            results[gateway_id]["user_token_status"] = {"status": "missing", "authorized": False}
+        return results
+
+    # One bulk token-info lookup for the whole batch instead of one per gateway id -
+    # the DB backend answers this with a single query; other backends fall back to
+    # AbstractTokenBackend's default per-id loop. Bounded by a timeout so a slow or
+    # unresponsive backend can't hold the request open indefinitely (see constant docstring).
+    token_storage = TokenStorageService(db, _build_user_context(current_user))
+    try:
+        bulk_token_info = await asyncio.wait_for(
+            token_storage.get_token_info_bulk(auth_code_ids, requester_email),
+            timeout=OAUTH_STATUS_BATCH_TOKEN_LOOKUP_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "OAuth status batch: token lookup timed out after %.0fs for %d gateway(s)",
+            OAUTH_STATUS_BATCH_TOKEN_LOOKUP_TIMEOUT_SECONDS,
+            len(auth_code_ids),
+        )
+        bulk_token_info = {gateway_id: TimeoutError("OAuth status batch token lookup timed out") for gateway_id in auth_code_ids}
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("OAuth status batch: bulk token lookup failed")
+        bulk_token_info = {gateway_id: exc for gateway_id in auth_code_ids}
+
+    for gateway_id in auth_code_ids:
+        results[gateway_id]["user_token_status"] = _token_info_to_status_payload(bulk_token_info.get(gateway_id))
+
+    return results
+
+
+async def _fetch_tools_via_token_exchange(
+    gateway_id: str,
+    gateway_service: Any,
+    requester_email: Optional[str],
+    request: Request,
+    *,
+    gateway_not_found_error: type,
+    gateway_connection_error: type,
+    gateway_error: type,
+) -> Dict[str, Any]:
+    """Fetch tools for a token-exchange gateway via the manual-refresh pipeline.
+
+    Token-exchange has no consent step: delegate to the manual-refresh pipeline,
+    which exchanges the caller's inbound JWT (bearer header or jwt_token cookie)
+    via ``_resolve_token_exchange_header`` (issue #5382). Exception order matters:
+    ``GatewayNotFoundError`` and ``GatewayConnectionError`` both subclass
+    ``GatewayError`` — a bare ``GatewayError`` clause first would misclassify
+    not-found and connection failures as 409 instead of 404/400.
+
+    Blast radius note: ``extract_subject_jwt()`` only checks the inbound JWT's
+    compact-serialization *shape*, not its ``exp`` claim. An expired jwt_token
+    cookie still passes that check, gets forwarded as the RFC 8693 subject_token,
+    and is rejected by the Authorization Server -- which trips
+    ``_resolve_token_exchange_header()``'s ``set_failure()`` negative cache for
+    the ``(gateway_id, user, audience)`` key. Until that cache entry's TTL
+    drains, every subsequent call here for the same user+gateway+audience
+    short-circuits via ``is_failed()``, even after the user re-authenticates
+    with a fresh cookie. A future increase to the negative-cache TTL widens
+    this window and should account for it.
+
+    Args:
+        gateway_id: ID of the gateway to fetch tools for.
+        gateway_service: GatewayService instance used to perform the refresh.
+        requester_email: Email of the requesting user, or None.
+        request: Incoming request, forwarded so the subject token can be resolved.
+        gateway_not_found_error: The caller's ``GatewayNotFoundError`` class, passed
+            in rather than re-imported here so both scopes reference the same
+            exception object the outer handler's ``except`` clauses were built with.
+        gateway_connection_error: The caller's ``GatewayConnectionError`` class, same rationale.
+        gateway_error: The caller's ``GatewayError`` class, same rationale.
+
+    Returns:
+        Dict containing success status and message with number of tools fetched.
+
+    Raises:
+        HTTPException: If the gateway is not found (404), the connection fails
+            (re-raised for the caller to map to 400), a refresh is already in
+            progress (409), or the refresh otherwise fails (400).
+    """
+    try:
+        refresh_result = await gateway_service.refresh_gateway_manually(
+            gateway_id=gateway_id,
+            include_resources=True,
+            include_prompts=True,
+            user_email=requester_email,
+            request_headers=dict(request.headers),
+        )
+    except gateway_not_found_error:
+        raise HTTPException(status_code=404, detail=f"Gateway not found: {gateway_id}")
+    except GatewayToolNameConflictError as conflict:
+        raise HTTPException(status_code=409, detail=str(conflict))
+    except gateway_connection_error:
+        raise  # outer handler maps to 400
+    except gateway_error as ge:
+        logger.warning(f"Token-exchange tool refresh conflict for gateway {SecurityValidator.sanitize_log_message(gateway_id)}: {SecurityValidator.sanitize_log_message(str(ge))}")
+        raise HTTPException(status_code=409, detail="Refresh already in progress for this gateway")
+
+    if refresh_result.get("success") is False:
+        logger.error(f"Token-exchange tool fetch failed for gateway {SecurityValidator.sanitize_log_message(gateway_id)}: {SecurityValidator.sanitize_log_message(str(refresh_result.get('error')))}")
+        raise HTTPException(status_code=400, detail="Failed to fetch tools")
+
+    fetched = int(refresh_result.get("tools_added", 0)) + int(refresh_result.get("tools_updated", 0))
+    return {"success": True, "message": f"Successfully fetched and created {fetched} tools"}
+
+
+@oauth_router.post("/fetch-tools/{gateway_id}")
+@require_permission("gateways.update")
+async def fetch_tools_after_oauth(
+    gateway_id: str,
+    request: Request,
+    _: None = Depends(enforce_fetch_tools_csrf),
+    current_user: EmailUserResponse = Depends(get_current_user_with_permissions),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Fetch tools from the MCP server after OAuth completion (authorization_code) or via on-demand token exchange (token-exchange).
+
+    Args:
+        gateway_id: ID of the gateway to fetch tools for
+        request: Incoming request used for token scope context
+        current_user: The authenticated user fetching tools
+        db: Database session
+
+    Returns:
+        Dict containing success status and message with number of tools fetched
+
+    Raises:
+        HTTPException: If fetching tools fails
+    """
+    try:
+        gateway = db.execute(select(Gateway).where(Gateway.id == gateway_id)).scalar_one_or_none()
+        if not gateway:
+            raise HTTPException(status_code=404, detail=f"Gateway not found: {gateway_id}")
+
+        requester_email = get_user_email(current_user)
+        # Filter out "unknown" sentinel - OAuth requires a real user identity
+        if requester_email == "unknown":
+            requester_email = None
+        await _enforce_gateway_access(gateway_id, gateway, current_user, db, request=request)
+
+        # Use _build_user_context so that jwt_teams_claim drives path selection
+        # for session tokens. Reading request.state.token_teams directly is wrong
+        # here because admin bypass in resolve_session_teams collapses it to None
+        # even when the 5-min callback JWT carries teams=["engineering"].
+        user_context = _build_user_context(current_user)
+        token_teams = user_context.get("teams")
+
+        logger.debug(
+            "fetch_tools_after_oauth: gateway=%s, token_use=%s, resolved_teams=%s",
+            gateway_id,
+            current_user.get("token_use") if isinstance(current_user, dict) else "n/a",
+            token_teams,
+        )
+
+        # First-Party
+        from mcpgateway.services.gateway_service import GatewayConnectionError, GatewayError, GatewayNotFoundError, GatewayService
+
+        gateway_service = GatewayService()
+
+        grant_type = gateway.oauth_config.get("grant_type") if isinstance(gateway.oauth_config, dict) else None
+        if grant_type == GRANT_TYPE_TOKEN_EXCHANGE:
+            return await _fetch_tools_via_token_exchange(
+                gateway_id,
+                gateway_service,
+                requester_email,
+                request,
+                gateway_not_found_error=GatewayNotFoundError,
+                gateway_connection_error=GatewayConnectionError,
+                gateway_error=GatewayError,
+            )
+
+        result = await gateway_service.fetch_tools_after_oauth(db, gateway_id, requester_email, teams=token_teams)
+        tools_count = len(result.get("tools", []))
+
+        return {"success": True, "message": f"Successfully fetched and created {tools_count} tools"}
+
+    except HTTPException:
+        raise
+    except GatewayToolNameConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except GatewayConnectionError as e:
+        logger.error("FETCH-TOOLS FAILED [GatewayConnectionError] gateway=%s error=%s", SecurityValidator.sanitize_log_message(gateway_id), e, exc_info=True)
+        raise HTTPException(status_code=400, detail="Failed to fetch tools")
+    except Exception as e:
+        logger.error("FETCH-TOOLS FAILED [Exception] gateway=%s error=%s", SecurityValidator.sanitize_log_message(gateway_id), e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch tools")
+
+
+# ============================================================================
+# Admin Endpoints for DCR Management
+# ============================================================================
+
+
+@oauth_router.get("/registered-clients")
+@require_permission(Permissions.ADMIN_OAUTH_CLIENTS_READ, allow_admin_bypass=False, global_only=True)
+async def list_registered_oauth_clients(request: Request, current_user: EmailUserResponse = Depends(get_current_user_with_permissions), db: Session = Depends(get_db)) -> Dict[str, Any]:  # noqa: ARG001
+    """List all registered OAuth clients (created via DCR).
+
+    This endpoint shows OAuth clients that were dynamically registered with external
+    Authorization Servers using RFC 7591 Dynamic Client Registration.
+
+    Args:
+        request: The FastAPI request object.
+        current_user: The authenticated user (requires ``admin.oauth_clients:read`` and un-narrowed admin scope)
+        db: Database session
+
+    Returns:
+        Dict containing list of registered OAuth clients with metadata
+
+    Raises:
+        HTTPException: If user lacks permissions or database error occurs
+    """
+    _require_unnarrowed_admin(request, current_user)
+
+    try:
+        # First-Party
+        from mcpgateway.db import RegisteredOAuthClient
+
+        # Query all registered clients
+        clients = db.execute(select(RegisteredOAuthClient)).scalars().all()
+
+        # Build response
+        clients_data = []
+        for client in clients:
+            clients_data.append(
+                {
+                    "id": client.id,
+                    "gateway_id": client.gateway_id,
+                    "issuer": client.issuer,
+                    "client_id": client.client_id,
+                    "redirect_uris": client.redirect_uris.split(",") if isinstance(client.redirect_uris, str) else client.redirect_uris,
+                    "grant_types": client.grant_types.split(",") if isinstance(client.grant_types, str) else client.grant_types,
+                    "scope": client.scope,
+                    "token_endpoint_auth_method": client.token_endpoint_auth_method,
+                    "created_at": client.created_at.isoformat() if client.created_at else None,
+                    "expires_at": client.expires_at.isoformat() if client.expires_at else None,
+                    "is_active": client.is_active,
+                }
+            )
+
+        return {"total": len(clients_data), "clients": clients_data}
+
+    except Exception as e:
+        logger.error(f"Failed to list registered OAuth clients: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list registered clients")
+
+
+@oauth_router.get("/registered-clients/{gateway_id}")
+@require_permission(Permissions.ADMIN_OAUTH_CLIENTS_READ, allow_admin_bypass=False, global_only=True)
+async def get_registered_client_for_gateway(
+    gateway_id: str,
+    request: Request,
+    current_user: EmailUserResponse = Depends(get_current_user_with_permissions),
+    db: Session = Depends(get_db),  # noqa: ARG001
+) -> Dict[str, Any]:
+    """Get the registered OAuth client for a specific gateway.
+
+    Args:
+        gateway_id: The gateway ID to lookup
+        request: The FastAPI request object.
+        current_user: The authenticated user (requires ``admin.oauth_clients:read`` and un-narrowed admin scope)
+        db: Database session
+
+    Returns:
+        Dict containing registered client information
+
+    Raises:
+        HTTPException: If gateway or registered client not found
+    """
+    _require_unnarrowed_admin(request, current_user)
+
+    try:
+        # First-Party
+        from mcpgateway.db import RegisteredOAuthClient
+
+        # Query registered client for this gateway
+        client = db.execute(select(RegisteredOAuthClient).where(RegisteredOAuthClient.gateway_id == gateway_id)).scalar_one_or_none()
+
+        if not client:
+            raise HTTPException(status_code=404, detail=f"No registered OAuth client found for gateway {gateway_id}")
+
+        return {
+            "id": client.id,
+            "gateway_id": client.gateway_id,
+            "issuer": client.issuer,
+            "client_id": client.client_id,
+            "redirect_uris": client.redirect_uris.split(",") if isinstance(client.redirect_uris, str) else client.redirect_uris,
+            "grant_types": client.grant_types.split(",") if isinstance(client.grant_types, str) else client.grant_types,
+            "scope": client.scope,
+            "token_endpoint_auth_method": client.token_endpoint_auth_method,
+            "registration_client_uri": client.registration_client_uri,
+            "created_at": client.created_at.isoformat() if client.created_at else None,
+            "expires_at": client.expires_at.isoformat() if client.expires_at else None,
+            "is_active": client.is_active,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get registered client for gateway {SecurityValidator.sanitize_log_message(gateway_id)}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get registered client")
+
+
+@oauth_router.delete("/registered-clients/{client_id}")
+@require_permission(Permissions.ADMIN_OAUTH_CLIENTS_DELETE, allow_admin_bypass=False, global_only=True)
+async def delete_registered_client(client_id: str, request: Request, current_user: EmailUserResponse = Depends(get_current_user_with_permissions), db: Session = Depends(get_db)) -> Dict[str, Any]:  # noqa: ARG001
+    """Delete a registered OAuth client.
+
+    This will revoke the client registration locally. Note: This does not automatically
+    revoke the client at the Authorization Server. You may need to manually revoke the
+    client using the registration_client_uri if available.
+
+    Args:
+        client_id: The registered client ID to delete
+        request: The FastAPI request object.
+        current_user: The authenticated user (requires ``admin.oauth_clients:delete`` and un-narrowed admin scope)
+        db: Database session
+
+    Returns:
+        Dict containing success message
+
+    Raises:
+        HTTPException: If client not found or deletion fails
+    """
+    _require_unnarrowed_admin(request, current_user)
+
+    try:
+        # First-Party
+        from mcpgateway.db import RegisteredOAuthClient
+
+        # Find the client
+        client = db.execute(select(RegisteredOAuthClient).where(RegisteredOAuthClient.id == client_id)).scalar_one_or_none()
+
+        if not client:
+            raise HTTPException(status_code=404, detail=f"Registered client {client_id} not found")
+
+        issuer = client.issuer
+        gateway_id = client.gateway_id
+
+        # Delete the client
+        db.delete(client)
+        db.commit()
+        db.close()
+
+        logger.info(
+            f"Deleted registered OAuth client {SecurityValidator.sanitize_log_message(client_id)} for gateway {SecurityValidator.sanitize_log_message(gateway_id)} (issuer: {SecurityValidator.sanitize_log_message(issuer)})"
+        )
+
+        return {"success": True, "message": f"Registered OAuth client {client_id} deleted successfully", "gateway_id": gateway_id, "issuer": issuer}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete registered client {client_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete registered client")

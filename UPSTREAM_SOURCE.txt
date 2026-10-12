@@ -1,0 +1,4 @@
+Upstream source: IBM/mcp-context-forge
+Commit: 520a7b98712f066075d6a704624fbb3dee76a69c
+Imported runtime directories: mcpgateway/, plugins/, scripts/
+Not imported: tests, Ansible, Cargo/Rust crates, benchmarks, Helm, infrastructure samples.
