@@ -1,4 +1,4 @@
-# Minimal deployment of upstream IBM ContextForge. No source-code fork.
+# Local source build of IBM ContextForge (Python MCP runtime, no Rust).
 # Reverse proxy: host Nginx -> 127.0.0.1:4444
 name: contextforge
 
@@ -17,6 +17,9 @@ x-app-env: &app-env
   REDIS_URL: redis://redis:6379/0
   TRANSPORT_TYPE: streamablehttp
   HOST: 0.0.0.0
+  RUST_MCP_MODE: off
+  MCPGATEWAY_SKIP_MIGRATIONS: "true"
+  REQUIRE_USER_IN_DB: "false"
 
 services:
   postgres:
@@ -44,7 +47,10 @@ services:
     networks: [backend]
 
   migration:
-    image: ${CONTEXTFORGE_IMAGE:?Pin a ContextForge image tag}
+    image: contextforge-local:1.0.11
+    build:
+      context: .
+      dockerfile: Dockerfile
     restart: "no"
     command: ["python", "-m", "mcpgateway.bootstrap_db"]
     environment:
@@ -55,7 +61,10 @@ services:
     networks: [backend]
 
   gateway:
-    image: ${CONTEXTFORGE_IMAGE:?Pin a ContextForge image tag}
+    image: contextforge-local:1.0.11
+    build:
+      context: .
+      dockerfile: Dockerfile
     restart: unless-stopped
     ports:
       - "127.0.0.1:4444:4444"
