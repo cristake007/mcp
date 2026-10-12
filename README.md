@@ -1,40 +1,40 @@
-# ContextForge deployment — mcp.cursurituv.ro
+# ContextForge MCP — mcp.cursurituv.ro
 
-A minimal self-hosted deployment of [IBM ContextForge](https://github.com/IBM/mcp-context-forge), based on the **official upstream container image**. No previous custom MCP code is used and no ContextForge application modules are copied or maintained locally.
+Independent source-based deployment of IBM ContextForge (upstream source pinned at `520a7b98712f066075d6a704624fbb3dee76a69c`). Python gateway, built admin UI, upstream database migrations, PostgreSQL 18, Redis. No Rust, Ansible, Helm or bundled Nginx.
 
-## Components
-- ContextForge gateway and built-in administration UI (official image)
-- PostgreSQL 18, private container network, persistent volume
-- Redis, private container network, persistent volume
-- Existing **host Nginx** terminates HTTPS and proxies to `127.0.0.1:4444`
-- Separate one-shot ContextForge database/bootstrap migration container
+## Deploy on a Linux host with Docker Compose and existing Nginx
 
-## Before deployment
-1. Create DNS record for `mcp.cursurituv.ro` and configure the already-installed host Nginx with valid TLS.
-2. Copy `.env.example` to `.env`, pin a verified upstream image release, and generate strong, **distinct** values for every secret. Do not commit `.env`.
-3. Verify the image's release documentation and environment compatibility. The stack has not yet been deployed or integration-tested.
-4. Review the administration UI security for internet-facing use. Consider restricting `/admin` by IP/VPN.
-
-## Commands
 ```sh
-cp .env.example .env
-# edit .env and generate secrets
-docker compose config
-docker compose pull
+git clone https://github.com/cristake007/mcp.git
+cd mcp
+python3 scripts/generate_deployment_env.py
+nano .env # Set PLATFORM_ADMIN_EMAIL to an actual mailbox
+docker compose config -q
+docker compose build gateway
 docker compose up -d
 docker compose ps
-docker compose logs --tail=100 gateway
+docker compose logs --tail=100 gateway migration
 curl -fsS http://127.0.0.1:4444/health
 ```
 
-## Host Nginx
-Use `nginx/mcp.cursurituv.ro.conf.example` as a *reference location block*, integrate it into your existing HTTPS virtual host. Do not activate an HTTP-only public deployment.
+The startup sequence runs `migration` once, then `gateway`. The application port is bound only to host loopback `127.0.0.1:4444`. PostgreSQL and Redis are Docker-private and use persistent volumes. No Docker database port is published.
+
+Do **not** commit `.env`; the secret generator refuses to overwrite an existing file. Use strong independent credentials, rotate any exposed secrets, and back up PostgreSQL externally. On future releases, review migrations before `docker compose up`.
+
+## Host Nginx and TLS
+
+Use the existing HTTPS virtual host for `mcp.cursurituv.ro`, and proxy requests to `http://127.0.0.1:4444`. See `nginx/mcp.cursurituv.ro.conf.example` for the proxy location snippet. TLS certificates stay on the **host**, not in Docker. Cloudflare Origin CA wildcard certificates require Cloudflare proxying for browser trust; public-trust wildcard certificates also work without Cloudflare.
+
+Restrict admin access as appropriate. Configure public DNS and TLS before enabling internet access. No Certbot or additional Nginx container is installed by this deployment.
 
 ## Tools
-This repository intentionally contains **no preinstalled business MCP tools**. Register only the tools needed in the ContextForge UI, then assign them to a virtual server and enforce least-privilege access. An empty tools registry is a valid starting point.
 
-## Provenance and license
-Deployment structure reviewed against IBM/mcp-context-forge `main` on 2026-10-12. Runtime code stays upstream in the official image. ContextForge is Apache-2.0 licensed; see `LICENSE`. Track upstream releases and validate updates in staging before changing the image pin.
+There are no pre-enabled external business tools. Configure only the needed tools and virtual servers in ContextForge, with access permissions. See `examples/mcp-tools/` for isolated reference tools; examples are not automatically deployed.
 
-## Important
-This is an initial configuration **not yet deployed or verified against a live release**. No existing host Nginx or Docker services have been changed.
+## Build and security notes
+
+`Dockerfile` builds the application and compiled admin assets from the source copied into this repository. `Containerfile.upstream` is only the original reference and is **not** used because it expects Rust source/build files that are intentionally absent. Build validation runs in GitHub Actions; check the latest `Validate local ContextForge image` run before deploying.
+
+The copied runtime is subject to the upstream Apache-2.0 license (`LICENSE`). See `upstream-reference/` for selected upstream documentation. The source is vendored, not kept automatically in sync with IBM: updates need deliberate review and re-import.
+
+**Production use requires a passing image build and actual deployment checks**, especially admin login, database persistence, OAuth client registration, tool authorization, TLS, backup and restore.
