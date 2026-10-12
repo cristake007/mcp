@@ -17,9 +17,8 @@ x-app-env: &app-env
   REDIS_URL: redis://redis:6379/0
   TRANSPORT_TYPE: streamablehttp
   HOST: 0.0.0.0
-  RUST_MCP_MODE: off
+  RUST_MCP_MODE: "off"
   MCPGATEWAY_SKIP_MIGRATIONS: "true"
-  REQUIRE_USER_IN_DB: "false"
 
 services:
   postgres:
