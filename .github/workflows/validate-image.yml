@@ -1,0 +1,32 @@
+name: Validate local ContextForge image
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - Dockerfile
+      - compose.yaml
+      - pyproject.toml
+      - package.json
+      - package-lock.json
+      - mcpgateway/**
+      - plugins/**
+      - .github/workflows/validate-image.yml
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Docker Compose configuration with synthetic secrets
+        env:
+          POSTGRES_PASSWORD: local_check_only
+          JWT_SECRET_KEY: local_check_only_aaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          AUTH_ENCRYPTION_SECRET: local_check_only_bbbbbbbbbbbbbbbbbbbbbbbb
+          PLATFORM_ADMIN_EMAIL: admin@example.invalid
+          PLATFORM_ADMIN_PASSWORD: local_check_only_password
+          DEFAULT_USER_PASSWORD: local_check_only_password_other
+        run: docker compose -f compose.yaml config -q
+      - name: Build local server image
+        run: docker build --progress=plain -t contextforge-local:1.0.11 -f Dockerfile .
