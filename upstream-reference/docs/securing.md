@@ -1,0 +1,969 @@
+# Securing ContextForge
+
+This guide provides essential security configurations and best practices for deploying ContextForge in production environments.
+
+## ⚠️ Critical Security Notice
+
+**ContextForge is currently in beta (v1.0.0-RC-3)** and requires careful security configuration for production use:
+
+- The **Admin UI is development-only** and must be disabled in production
+- Expect **breaking changes** between versions until 1.0 release
+- Do not use it with insecure MCP servers.
+
+## 🚨 Production Security Checklist
+
+### 1. Disable Development Features
+
+```bash
+# Required for production - disable all admin interfaces
+MCPGATEWAY_UI_ENABLED=false
+MCPGATEWAY_ADMIN_API_ENABLED=false
+
+# Optional: turn off auxiliary systems you do not need
+MCPGATEWAY_BULK_IMPORT_ENABLED=false
+MCPGATEWAY_A2A_ENABLED=false
+```
+
+Use RBAC policies to revoke access to prompts, resources, or tools you do not
+intend to expose—these surfaces are always mounted but can be hidden from end
+users by removing the corresponding permissions.
+
+### 2. Enable Authentication & Security
+
+```bash
+# Configure strong authentication
+AUTH_REQUIRED=true
+
+# Basic auth is DISABLED by default (recommended for security)
+# API_ALLOW_BASIC_AUTH=false    # Default - use JWT tokens instead
+# DOCS_ALLOW_BASIC_AUTH=false   # Default - use JWT tokens instead
+
+# If you MUST use Basic auth (legacy compatibility only):
+# API_ALLOW_BASIC_AUTH=true
+# BASIC_AUTH_USER=custom-username       # Change from default
+# BASIC_AUTH_PASSWORD=strong-password-here  # Use secrets manager
+
+# Platform admin user (auto-created during bootstrap)
+PLATFORM_ADMIN_EMAIL=admin@yourcompany.com  # Change from default
+PLATFORM_ADMIN_PASSWORD=secure-admin-password  # Use secrets manager
+
+# JWT Configuration - Choose based on deployment architecture
+JWT_ALGORITHM=RS256                        # Recommended for production (asymmetric)
+JWT_PUBLIC_KEY_PATH=jwt/public.pem         # Path to public key file
+JWT_PRIVATE_KEY_PATH=jwt/private.pem       # Path to private key file (secure location)
+JWT_AUDIENCE_VERIFICATION=true             # Enable audience validation
+JWT_ISSUER_VERIFICATION=true               # Enable issuer validation
+JWT_ISSUER=your-company-name               # Set to your organization identifier
+
+# Set environment for security defaults
+ENVIRONMENT=production
+
+# Configure domain for CORS
+APP_DOMAIN=yourdomain.com
+
+# Ensure secure cookies (automatic in production)
+SECURE_COOKIES=true
+COOKIE_SAMESITE=strict
+
+# Configure CORS (auto-configured based on APP_DOMAIN in production)
+CORS_ALLOW_CREDENTIALS=true
+```
+
+#### Platform Admin Security Notes
+
+The platform admin user (`PLATFORM_ADMIN_EMAIL`) is automatically created during database bootstrap with full administrative privileges. This user:
+
+- Has access to all RBAC-protected endpoints
+- Can manage users, teams, and system configuration
+- Is recognized by both database-persisted and virtual authentication flows
+- Should use a strong, unique email and password in production
+
+#### JWT Security Configuration
+
+ContextForge supports both symmetric (HMAC) and asymmetric (RSA/ECDSA) JWT algorithms. **Asymmetric algorithms are strongly recommended for production** due to enhanced security properties.
+
+##### Production JWT Security (Recommended)
+
+```bash
+# Use asymmetric algorithm for production
+JWT_ALGORITHM=RS256                        # or RS384, RS512, ES256, ES384, ES512
+JWT_PUBLIC_KEY_PATH=/secure/path/jwt/public.pem
+JWT_PRIVATE_KEY_PATH=/secure/path/jwt/private.pem
+JWT_AUDIENCE=your-api-identifier
+JWT_ISSUER=your-organization
+JWT_AUDIENCE_VERIFICATION=true
+JWT_ISSUER_VERIFICATION=true
+REQUIRE_TOKEN_EXPIRATION=true              # Reject tokens without exp claim
+REQUIRE_JTI=true                           # Require JWT ID for token tracking/revocation
+```
+
+##### Development JWT Security
+
+```bash
+# HMAC acceptable for development/testing only
+JWT_ALGORITHM=HS256
+JWT_SECRET_KEY=your-strong-secret-key-here  # Minimum 32 characters
+JWT_AUDIENCE=mcpgateway-api
+JWT_ISSUER=mcpgateway
+JWT_AUDIENCE_VERIFICATION=true
+JWT_ISSUER_VERIFICATION=true
+REQUIRE_TOKEN_EXPIRATION=true              # Reject tokens without exp claim
+REQUIRE_JTI=true                           # Require JWT ID for token tracking/revocation
+```
+
+##### JWT Key Management Best Practices
+
+**RSA Key Generation:**
+
+```bash
+# Option 1: Use Makefile (Recommended for development/local)
+make certs-jwt                   # Generates ./certs/jwt/{private,public}.pem with secure permissions
+
+# Option 2: Manual generation (Production with custom paths)
+mkdir -p /secure/certs/jwt
+openssl genrsa -out /secure/certs/jwt/private.pem 4096
+openssl rsa -in /secure/certs/jwt/private.pem -pubout -out /secure/certs/jwt/public.pem
+chmod 600 /secure/certs/jwt/private.pem  # Private key: owner read/write only
+chmod 644 /secure/certs/jwt/public.pem   # Public key: world readable
+chown mcpgateway:mcpgateway /secure/certs/jwt/*.pem
+```
+
+**ECDSA Key Generation (Alternative):**
+
+```bash
+# Option 1: Use Makefile (Recommended for development/local)
+make certs-jwt-ecdsa             # Generates ./certs/jwt/{ec_private,ec_public}.pem with secure permissions
+
+# Option 2: Manual generation (Production with custom paths)
+mkdir -p /secure/certs/jwt
+openssl ecparam -genkey -name prime256v1 -noout -out /secure/certs/jwt/ec_private.pem
+openssl ec -in /secure/certs/jwt/ec_private.pem -pubout -out /secure/certs/jwt/ec_public.pem
+chmod 600 /secure/certs/jwt/ec_private.pem
+chmod 644 /secure/certs/jwt/ec_public.pem
+```
+
+**Combined Generation (SSL + JWT):**
+
+```bash
+make certs-all                   # Generates both TLS certificates and JWT RSA keys
+```
+
+**Security Requirements:**
+
+- [ ] **Never commit private keys** to version control
+- [ ] **Store private keys** in secure, encrypted storage
+- [ ] **Use strong file permissions** (600) on private keys
+- [ ] **Implement key rotation** procedures (recommend 90-day rotation)
+- [ ] **Monitor key access** in system audit logs
+- [ ] **Use Hardware Security Modules (HSMs)** for high-security environments
+- [ ] **Separate key storage** from application deployment
+
+**Container Security for JWT Keys:**
+
+```bash
+# Mount keys as read-only secrets (Kubernetes example)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jwt-keys
+type: Opaque
+data:
+  private.pem: <base64-encoded-private-key>
+  public.pem: <base64-encoded-public-key>
+
+# In pod spec:
+volumes:
+
+  - name: jwt-keys
+    secret:
+      secretName: jwt-keys
+      defaultMode: 0600
+```
+
+### Database Reset and JWT Signing Keys
+
+JWT signature validation depends on signing-key continuity, not database continuity.
+Normal gateway restarts preserve valid local JWTs when the signing key remains unchanged.
+Deleting or recreating the database also leaves those JWTs cryptographically valid when the
+same key remains configured. Database loss removes token catalog entries and revocation
+records stored only in that database; it does not revoke self-contained JWTs.
+
+If a user or platform-admin identity remains available, is recreated, or qualifies for
+configured platform-admin bootstrap, an old signed JWT can pass current authorization checks.
+Actual external IdP tokens follow the external provider's lifecycle. Local session JWTs issued
+after an SSO login follow the local signing-key lifecycle described here. Restored database state
+can restore users, grants, and revocations from the backup point. Persistent storage remains
+required for production database state.
+
+Rotate `JWT_SECRET_KEY` whenever an environment is destructively reset or rebuilt and previous
+local JWTs must become invalid. Key rotation invalidates local session, CLI, and automation JWTs.
+Issue replacement tokens after rotation. All gateway replicas must receive the same new key
+before serving traffic; mixed old-key and new-key replicas produce inconsistent authentication.
+For asymmetric signing, rotate the signing key pair and remove the retired verification key
+when immediate invalidation is required.
+
+#### Destructive Reset Procedure
+
+1. Stop gateway instances and local token issuers.
+2. Reset or recreate the database.
+3. Generate a new JWT signing key through the existing secret-management workflow.
+4. Update the Kubernetes Secret, Compose environment, or external secret manager.
+5. Restart all gateway instances with the same new key.
+6. Reissue required CLI and automation tokens.
+7. Confirm an old token returns `401`.
+8. Confirm a replacement token succeeds.
+
+Do not generate a new signing key independently inside each gateway process. That breaks
+replicas and ordinary restarts.
+
+For production deployments:
+
+- Use persistent database storage.
+- Set `REQUIRE_USER_IN_DB=true` to reject tokens for missing non-platform-admin users.
+- Do not treat `REQUIRE_USER_IN_DB=true` as global token revocation; a recreated identity can satisfy user lookup again.
+- Store `JWT_SECRET_KEY` or the signing key pair in a managed secret store.
+- Use distinct signing keys for each environment.
+- Keep session JWT lifetimes short.
+- Avoid 30-day CLI JWTs for routine automation.
+- Prefer managed catalog tokens when revocation and usage tracking are required. Their revocation
+  state depends on persistent or restored database records.
+- Treat non-expiring JWTs as high-risk credentials.
+
+#### Environment Isolation
+
+When deploying ContextForge across multiple environments (DEV, UAT, PROD), you must configure unique JWT settings per environment to prevent tokens from one environment being accepted in another.
+
+**Required per-environment configuration:**
+
+| Setting                       | DEV                  | UAT                  | PROD                  |
+| ----------------------------- | -------------------- | -------------------- | --------------------- |
+| `JWT_SECRET_KEY` (or keypair) | Unique               | Unique               | Unique                |
+| `JWT_ISSUER`                  | `mcpgateway-dev`     | `mcpgateway-uat`     | `mcpgateway-prod`     |
+| `JWT_AUDIENCE`                | `mcpgateway-api-dev` | `mcpgateway-api-uat` | `mcpgateway-api-prod` |
+
+**Example production configuration:**
+
+```bash
+# Each environment MUST use different values
+JWT_SECRET_KEY="$(openssl rand -base64 32)"  # Or use separate keypairs
+JWT_ISSUER=mcpgateway-prod
+JWT_AUDIENCE=mcpgateway-api-prod
+JWT_ISSUER_VERIFICATION=true
+JWT_AUDIENCE_VERIFICATION=true
+ENVIRONMENT=production
+```
+
+!!! warning "Cross-Environment Token Acceptance"
+    If environments share the same JWT signing key and issuer/audience values, tokens created in DEV will be accepted in PROD. The gateway logs warnings at startup when default `JWT_ISSUER` or `JWT_AUDIENCE` values are detected in non-development environments.
+
+**Optional: Environment claim validation**
+
+For additional defense-in-depth, you can embed and validate an environment claim in tokens:
+
+```bash
+EMBED_ENVIRONMENT_IN_TOKENS=true   # Adds "env" claim to gateway-issued tokens
+VALIDATE_TOKEN_ENVIRONMENT=true    # Rejects tokens with mismatched "env" claim
+```
+
+This rejects tokens created for a different environment even if signing keys are accidentally shared. Tokens without an `env` claim are allowed for backward compatibility with existing tokens and external IdP tokens.
+
+### 3. Token Scoping Security
+
+The gateway supports fine-grained token scoping to restrict token access to specific servers, permissions, IP ranges, and time windows. This provides defense-in-depth security for API access.
+
+!!! tip "Detailed RBAC Documentation"
+    For comprehensive documentation on token scoping semantics, team-based access control, and visibility filtering, see the [RBAC Configuration Guide](rbac.md).
+
+#### Team-Based Token Scoping
+
+Tokens can be scoped to specific teams using the `teams` JWT claim:
+
+| Token Configuration  | Admin User                  | Non-Admin User |
+| -------------------- | --------------------------- | -------------- |
+| No `teams` key       | Public-only                 | Public-only    |
+| `teams: null`        | Admin bypass (unrestricted) | Public-only    |
+| `teams: []`          | Public-only                 | Public-only    |
+| `teams: ["team-id"]` | Team + Public               | Team + Public  |
+
+**Security Default**: Non-admin tokens without explicit team scope default to public-only access (principle of least privilege).
+
+!!! note "Session Tokens vs API Tokens"
+    For `token_use: "session"` (Admin UI login), teams are resolved server-side from DB/cache on each request via `resolve_session_teams()`. If the JWT carries a non-empty `teams` claim, the result is narrowed to the intersection of DB teams and JWT teams, allowing callers to scope a session to a subset of their memberships.
+    For `token_use: "api"` or legacy tokens, teams are interpreted from the JWT `teams` claim using `normalize_token_teams()`.
+
+#### Server-Scoped Tokens
+
+Server-scoped tokens are restricted to specific MCP servers and cannot access admin endpoints:
+
+!!! danger "CLI Token Security Warning"
+    The examples below use CLI token generation for demonstration. The CLI bypasses all security validations (team membership, permission containment, audit logging). **For production**, use the `/tokens` API endpoint which enforces proper security controls.
+
+```bash
+# Generate server-scoped token (DEV/TEST ONLY)
+python3 -m mcpgateway.utils.create_jwt_token \
+  --username user@example.com \
+  --scopes '{"server_id": "my-specific-server"}' \
+  --secret my-test-key-but-now-longer-than-32-bytes
+```
+
+**Security Features:**
+
+- Server-scoped tokens **cannot access `/admin`** endpoints (security hardening)
+- Only truly public endpoints (`/health`, `/ready`) bypass server restrictions
+- Documentation endpoints (`/docs`, `/redoc`, `/openapi.json`) are exempt from server scoping but still require auth by default
+- RBAC permission checks still apply to all endpoints
+
+#### Permission-Scoped Tokens
+
+Tokens can be restricted to specific permission sets:
+
+```bash
+# Generate permission-scoped token (DEV/TEST ONLY)
+python3 -m mcpgateway.utils.create_jwt_token \
+  --username user@example.com \
+  --scopes '{"permissions": ["tools.read", "resources.read"]}' \
+  --secret my-test-key-but-now-longer-than-32-bytes
+```
+
+**Canonical Permissions Used:**
+
+- `tools.create`, `tools.read`, `tools.update`, `tools.delete`, `tools.execute`
+- `resources.create`, `resources.read`, `resources.update`, `resources.delete`
+- `admin.system_config`, `admin.user_management`, `admin.security_audit`
+
+### 4. Token Lifecycle Management
+
+ContextForge provides token lifecycle controls including revocation and validation requirements.
+
+#### Token Revocation
+
+Tokens with a `jti` (JWT ID) claim are tracked and can be revoked before expiration:
+
+- Revoked tokens are normally rejected immediately on all endpoints
+- Token revocation is checked against the `token_revocations` database table
+- Administrators can revoke tokens via the Admin UI or API
+- Auth dependencies (`require_auth`, `require_admin_auth`) and MCP transport auth all enforce revocation and active-user checks on the normal path.
+- Availability trade-off: when revocation/user lookups fail due to a database outage, these checks currently fail open to preserve availability.
+
+```bash
+# Enable token tracking (required for revocation)
+REQUIRE_JTI=true
+```
+
+#### Token Validation Settings
+
+| Setting                    | Default | Description                            |
+| -------------------------- | ------- | -------------------------------------- |
+| `REQUIRE_TOKEN_EXPIRATION` | `true`  | Reject tokens without `exp` claim      |
+| `REQUIRE_JTI`              | `true`  | Require `jti` claim for token tracking |
+
+These settings are enabled by default for security. For backward compatibility with existing tokens that lack these claims, you can disable them (not recommended for production).
+
+### 5. Admin Route Authentication
+
+The Admin UI (`/admin/*`) enforces additional authentication checks beyond standard API authentication:
+
+#### Authentication Requirements
+
+- **Valid JWT token** with admin privileges, OR
+- **Proxy authentication** when `TRUST_PROXY_AUTH=true` (for deployments behind OAuth2 Proxy, Authelia, etc.)
+
+#### Validation Checks
+
+Admin routes perform the following validations:
+
+1. **Token revocation**: Tokens are checked against the revocation list
+2. **Account status**: Disabled accounts (`is_active=false`) are blocked
+3. **Admin privilege**: User must have `is_admin=true` in their profile
+
+#### Proxy Authentication
+
+For deployments using an authentication proxy:
+
+```bash
+# Enable proxy header authentication
+TRUST_PROXY_AUTH=true
+PROXY_USER_HEADER=X-Forwarded-User    # Header containing authenticated username
+
+# Important: Only enable when ContextForge is behind a trusted proxy
+# that properly sets and validates this header
+```
+
+### 6. Session Management
+
+The reverse proxy session management (`/reverse-proxy/sessions`) implements access controls:
+
+#### Session Access Rules
+
+| User Type       | Access Level                 |
+| --------------- | ---------------------------- |
+| Admin           | View all active sessions     |
+| Regular User    | View only their own sessions |
+| Unauthenticated | No access (401)              |
+
+#### Session Security Features
+
+- **Server-side ID generation**: Session IDs are generated server-side using UUIDs
+- **Ownership tracking**: Sessions are associated with the creating user
+- **No client-supplied IDs**: Client-provided session ID headers are ignored
+
+### 7. User Registration
+
+Control whether users can self-register accounts:
+
+```bash
+# Disable public registration (recommended for production)
+PUBLIC_REGISTRATION_ENABLED=false
+```
+
+When disabled, only administrators can create user accounts via the Admin UI or API.
+
+### 8. Network Security
+
+- [ ] Configure TLS/HTTPS with valid certificates
+- [ ] Implement firewall rules and network policies
+- [ ] Use internal-only endpoints where possible
+- [ ] Configure appropriate CORS policies (auto-configured by ENVIRONMENT setting)
+- [ ] Set up rate limiting per endpoint/client
+- [ ] Verify security headers are present (automatically added by SecurityHeadersMiddleware)
+- [ ] Configure iframe embedding policy (X_FRAME_OPTIONS=DENY by default, change to SAMEORIGIN if needed)
+- [ ] Verify Subresource Integrity (SRI) hashes for CDN resources (automatically verified in CI)
+
+#### Subresource Integrity (SRI)
+
+MCP Gateway implements Subresource Integrity for all external CDN resources to cryptographically verify that fetched resources have not been tampered with. This protects against:
+
+- **CDN Compromise**: Malicious code injection if a CDN is compromised
+- **MITM Attacks**: Content modification during transit
+- **DNS Hijacking**: Redirection to malicious CDN servers
+- **Version Drift**: Unexpected changes to CDN content
+
+**Protected Resources**:
+
+- HTMX (2.0.3) - Dynamic interactions (bundled via npm/Vite)
+- Alpine.js (3.x CSP) - Reactive framework (bundled via npm/Vite)
+- Chart.js (4.4.1) - Data visualization
+- Marked (11.1.1) - Markdown parser
+- DOMPurify (3.0.6) - XSS sanitizer
+- CodeMirror (5.65.18) - Code editor (7 files)
+- Font Awesome (6.4.0) - Icon library
+
+**Updating Frontend Assets**:
+
+When updating Admin UI frontend dependencies:
+
+1. Update the relevant npm dependencies in `package.json`
+2. Refresh the lockfile with `npm update` or `npm install`
+3. Rebuild the UI bundle with `make build-ui`
+4. Verify the generated assets load correctly in the Admin UI
+5. Commit the updated frontend source and lockfile changes
+
+The CI pipeline verifies the frontend build as part of normal validation.
+
+**Security Checklist**:
+
+- [x] All CDN resources have SRI integrity attributes
+- [x] All CDN URLs use exact version numbers (no `@latest`)
+- [x] CI verifies hashes match CDN content
+- [x] Hashes use SHA-384 algorithm (W3C recommended)
+- [ ] Review SRI hashes after any CDN library updates
+
+### 9. Content Security Framework
+
+ContextForge implements a comprehensive 6-layer content security framework to protect against malicious content in user-submitted resources and prompts:
+
+#### Layer 1: Size Validation
+
+Configure content size limits to prevent DoS via oversized resource or prompt submissions:
+
+```bash
+# Defaults shown — adjust to your workload requirements
+CONTENT_MAX_RESOURCE_SIZE=102400  # 100KB for resources (range: 1KB–10MB)
+CONTENT_MAX_PROMPT_SIZE=10240     # 10KB for prompt templates (range: 512B–1MB)
+```
+
+- [ ] Review default size limits for your use case
+- [ ] Monitor 413 responses in logs for legitimate content being blocked
+
+#### Layer 2: PII-Safe Logging
+
+User identifiers are automatically sanitized before being written to audit logs:
+
+- **Email addresses**: Hashed to an 8-character SHA-256 prefix
+- **IP addresses**: Last octet masked (e.g., `192.168.1.xxx`)
+
+This ensures that security event logs contain enough information for debugging and correlation without exposing raw PII. No additional configuration is required.
+
+#### Layer 3: Malicious Pattern Detection
+
+Detect and block common attack patterns including XSS, template injection, command injection, and SQL injection:
+
+```bash
+# Enable pattern detection (enabled by default)
+CONTENT_PATTERN_DETECTION_ENABLED=true
+
+# Configure validation mode
+CONTENT_PATTERN_VALIDATION_MODE=strict  # Options: strict, moderate, lenient
+
+# Enable pattern caching for performance (recommended)
+CONTENT_PATTERN_CACHE_ENABLED=true
+CONTENT_PATTERN_MAX_CACHE_SIZE=1000
+
+# Custom blocked patterns (JSON array of regex patterns)
+# CONTENT_BLOCKED_PATTERNS='["custom_pattern_1", "custom_pattern_2"]'
+```
+
+**Pattern Detection Behavior:**
+
+The system scans all content for malicious patterns. Specific high-risk template patterns
+(such as `{{ config }}` and `${...}`) are blocked globally, while generic template
+variables (such as `{{ user.name }}`) are not blocked. Prompt templates are additionally
+validated for balanced braces and Jinja2 syntax safety.
+
+| Pattern Type | Blocked Globally | Notes |
+|--------------|-----------------|-------|
+| XSS (`<script>`, `javascript:`) | ❌ **BLOCKED** | Always dangerous |
+| Command injection (`&&`, `` ` ``) | ❌ **BLOCKED** | Always dangerous |
+| SQL injection (`union`, `--`) | ❌ **BLOCKED** | Always dangerous |
+| High-risk template (`{{ config }}`, `${...}`) | ❌ **BLOCKED** | Blocks config access and expression evaluation |
+| Generic template variables (`{{ var }}`) | ✅ **ALLOWED** | Legitimate in prompts and resources |
+
+**Example - Legitimate Prompt Template:**
+
+```python
+# ✅ This is ALLOWED
+template = "Hello {{ user.name }}, welcome to {{ company }}!"
+```
+
+**Example - Potential SSTI Attack:**
+```python
+# ❌ This is BLOCKED
+content = "Data: {{ config.secret_key }}"  # Potential server-side template injection
+```
+
+**Default Attack Patterns:**
+
+1. **XSS Attacks** (4 patterns) - **Always blocked**:
+   - Script tag injection: `<script[^>]*>.*?</script>`
+   - Event handler injection: `on\w+\s*=`
+   - JavaScript protocol: `javascript:`
+   - Iframe injection: `<iframe[^>]*>`
+
+2. **Command Injection** (4 patterns) - **Always blocked**:
+   - Dangerous rm command: `;\s*rm\s+-rf`
+   - Command chaining: `&&|\|\|`
+   - Backtick execution: `` `[^`]+` ``
+   - Command substitution: `\$\([^)]+\)`
+
+3. **SQL Injection** (3 patterns) - **Always blocked**:
+   - SQL keywords: `(?i)(union|select|insert|update|delete|drop)\s+`
+   - Comment injection: `--\s*$`
+   - Classic injection: `'\s*or\s*'1'\s*=\s*'1`
+
+4. **Template Injection** (4 patterns) - **High-risk patterns only**:
+   - Jinja2 config object access: `\{\{\s*config\s*\}\}`
+   - Jinja2 config attribute access: `\{\{\s*config\.`
+   - Jinja2 config loops: `\{%\s*for\s+\w+\s+in\s+config`
+   - Expression evaluation: `\$\{.*\}`
+
+**Validation Modes:**
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `strict` | Block high-risk patterns | Production (recommended) |
+| `moderate` | Same as strict | Production |
+| `lenient` | Log only, don't block | Monitoring, testing |
+
+**Note**: Both `strict` and `moderate` modes block the same set of high-risk patterns. The distinction is maintained for future enhancements.
+
+**Performance Optimization:**
+
+- **Pattern Caching**: Compiled regex patterns are reused and successful clean validation results are cached for repeated content
+- **Cache Size**: Default 1000 clean validation results, configurable via `CONTENT_PATTERN_MAX_CACHE_SIZE`
+- **Startup Compilation**: Patterns compile once when the content security service initializes
+- **Thread-Safe**: Cache uses threading locks for concurrent access
+
+**Security Checklist:**
+
+- [ ] Enable pattern detection in production (`CONTENT_PATTERN_DETECTION_ENABLED=true`)
+- [ ] Use `strict` mode for production workloads
+- [ ] Enable pattern caching for performance
+- [ ] Monitor pattern violation logs for false positives
+- [ ] Review custom patterns for your specific use case
+- [ ] Test legitimate content doesn't trigger false positives
+- [ ] Configure appropriate validation mode per environment
+
+#### Layer 4: Content Sanitization
+
+HTML and markdown content is sanitized using DOMPurify (client-side) and bleach (server-side):
+
+- Removes dangerous HTML tags and attributes
+- Preserves safe formatting elements
+- Prevents XSS via DOM manipulation
+
+#### Layer 5: Output Encoding
+
+All content is properly encoded for the output context:
+
+- HTML entity encoding for web display
+- JSON escaping for API responses
+- SQL parameterization for database queries
+
+#### Layer 6: Content Security Policy (CSP)
+
+Strict CSP headers prevent inline script execution:
+
+```
+Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' cdn.jsdelivr.net unpkg.com; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net
+```
+
+**Defense in Depth:**
+
+The 6-layer approach ensures that even if one layer is bypassed, other layers provide protection. For example:
+
+1. Size limits prevent DoS before content is processed
+2. PII-safe logging prevents sensitive data exposure in audit trails
+3. Pattern detection catches attack attempts
+4. Sanitization removes dangerous elements
+5. Output encoding prevents injection
+6. CSP blocks execution even if content is injected
+
+**Monitoring and Logging:**
+
+All content security violations are logged with:
+
+- Violation type (size, pattern, etc.)
+- Sanitized user identifier (email hashed, IP masked)
+- Timestamp and correlation ID
+- Attack classification (XSS, SQLi, etc.)
+- Validation mode and action taken
+
+**Example Log Entry:**
+
+```json
+{
+  "timestamp": "2026-03-27T12:00:00Z",
+  "level": "WARNING",
+  "message": "Content pattern violation detected",
+  "user_hash": "a1b2c3d4",
+  "violation_type": "xss_script_tag",
+  "validation_mode": "strict",
+  "action": "blocked",
+  "correlation_id": "abc123"
+}
+```
+
+**Integration Points:**
+
+Content security is enforced at the service layer:
+
+- `resource_service.py`: `register_resource()`, `update_resource()`, `register_resources_bulk()`
+- `prompt_service.py`: `register_prompt()`, `update_prompt()`, `register_prompts_bulk()`
+
+All 6 methods validate content before database persistence.
+
+### 10. Container Security
+
+```bash
+# Run containers with security constraints
+docker run \
+  --read-only \
+  --user 10001:10001 \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  mcpgateway:latest
+```
+
+- [ ] Use minimal base images (UBI Micro)
+- [ ] Run as non-root user
+- [ ] Enable read-only filesystem
+- [ ] Set resource limits (CPU, memory)
+- [ ] Scan images for vulnerabilities
+
+### 11. Secrets Management
+
+- [ ] **Never store secrets in environment variables directly**
+- [ ] Use a secrets management system (Vault, AWS Secrets Manager, etc.)
+- [ ] Rotate credentials regularly
+- [ ] Restrict container access to secrets
+- [ ] Never commit `.env` files to version control
+
+### 12. MCP Server Validation
+
+Before connecting any MCP server:
+
+- [ ] Verify server authenticity and source code
+- [ ] Review server permissions and data access
+- [ ] Test in isolated environment first
+- [ ] Monitor server behavior for anomalies
+- [ ] Implement rate limiting for untrusted servers
+
+### 13. jq Filter Sandbox
+
+Tool `jsonpath_filter` values are jq programs. They are validated when a tool is
+written and again when it is invoked, and — on Linux — they execute in a forked
+worker whose environment has been cleared, under `JQ_FILTER_TIMEOUT_SECONDS`.
+
+Filters that reference `env`, `$ENV`, `input`, `inputs`, `input_filename`,
+`input_line_number`, `$__loc__`, `debug`, `stderr`, `include`, `import`, or
+`modulemeta` are rejected. Field access such as `.env` is unaffected.
+
+Object-construction keys are read as code, so an unquoted key named after a
+restricted built-in is refused. Quote it instead — write `{"env": .region}`
+rather than `{env: .region}`.
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `JQ_FILTER_EXECUTION` | `subprocess` | `subprocess` runs filters in the sandbox; `inprocess` disables it. |
+| `JQ_FILTER_TIMEOUT_SECONDS` | `2.0` | Wall-clock limit for a single filter. |
+| `JQ_FILTER_WORKERS` | `2` | Worker processes per gateway process. Raise it if filtered tools are called concurrently enough that a single slow filter queues others. |
+
+!!! warning "The sandbox is Linux-only"
+    The forked worker requires the `fork` start method, which is unsafe on
+    Darwin, so `subprocess` mode is silently inactive on any non-Linux platform
+    **regardless of `JQ_FILTER_EXECUTION`**. There, filters run in-process with
+    no environment scrub and no time limit, and the static denylist above is the
+    only protection. This is announced by a `WARNING` at startup — check for it
+    if you run the gateway outside a Linux container. The shipped container
+    images are Linux, so production deployments get the sandbox.
+
+`JQ_FILTER_EXECUTION=inprocess` likewise disables both the environment scrub and
+the time limit. It exists only for platforms without a usable `fork`, and must
+not be set in production.
+
+**Blast radius of a timeout.** A filter that overruns its limit causes the whole
+worker pool to be killed and rebuilt, because `ProcessPoolExecutor` cannot
+cancel a task that is already running and offers no way to target one worker.
+Other filters in flight at that moment are aborted and reported as errors to
+their own callers. Raising `JQ_FILTER_WORKERS` does not narrow this — the kill
+is pool-wide by design. It is an accepted trade-off: the alternative is leaving
+a non-terminating filter holding a worker indefinitely. The pool is also
+rebuilt if a worker dies abnormally (for example, if the kernel OOM-kills a
+filter that allocates without bound), so a single hostile filter cannot disable
+response filtering for the lifetime of the gateway process.
+
+**If you ran a build released before this change**, treat the following as
+disclosed and rotate them: `JWT_SECRET_KEY`, `AUTH_ENCRYPTION_SECRET`, and the
+credentials embedded in `DATABASE_URL` and `REDIS_URL`, plus
+`BASIC_AUTH_PASSWORD`. Audit existing tools for hostile `jsonpath_filter` values
+before upgrading, since those tools will begin failing at invoke time.
+
+### 14. JSON Schema Regex Sandbox
+
+A JSON Schema `pattern` or `patternProperties` keyword is a regular expression,
+and tool, prompt, and output schemas are attacker-influenced. A schema that
+carries either keyword has its whole validation run in a killable worker
+process, under a wall-clock limit. A schema with neither keyword validates
+inline, with no sandbox overhead. Routing looks only at keyword presence,
+never at pattern content.
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `REGEX_TIMEOUT_SECONDS` | `1.0` | Wall-clock limit for one schema validation that carries a regex keyword. Must be `> 0` and `<= 60`. |
+| `REGEX_WORKERS` | `2` | Schema-validation worker processes per gateway worker. Range: `1`–`16`. |
+| `REGEX_MAX_SUBJECT_BYTES` | `262144` | Maximum serialized instance size sent to the sandbox. A larger instance fails validation closed. Range: `1024`–`10485760` (1KB–10MB). |
+
+!!! warning "Fail-closed, not fail-open"
+    A timeout, an oversize instance, or a sandbox that failed to start all
+    fail the validation. None of these ever falls back to an unbounded
+    inline match. No setting disables the sandbox for a regex-bearing schema.
+
+**Platform.** The sandbox forks worker processes on Linux. On any other
+platform it falls back to `spawn`, matching the jq filter sandbox's own
+platform split (see section 13). The shipped container images are Linux.
+
+**Plugin-configured regex.** Regex patterns that an operator supplies in
+plugin configuration are not routed through this sandbox — they come from
+deploy-time configuration, not from a request. The gateway logs one warning
+per pattern at plugin load, so an operator has an inventory of unbounded
+patterns, but does not bound their compile or match time.
+
+**Federated MCP output validation.** The MCP client SDK's own result
+validation (`mcp.ClientSession._validate_tool_result`, in the installed `mcp`
+package, not `mcpgateway`) validates a federated peer's `structuredContent`
+against that peer's advertised `outputSchema` with a stock `jsonschema` validator, before
+the gateway's own sandboxed check runs. A hostile federated MCP server
+controls both the schema and the instance on this path, and it is not yet
+bounded by this sandbox; tracked as a follow-up.
+
+### 15. Database Security
+
+- [ ] Use TLS for database connections
+- [ ] Configure strong passwords
+- [ ] Restrict database access by IP/network
+- [ ] Enable audit logging
+- [ ] Regular backups with encryption
+
+### 16. Monitoring & Logging
+
+- [ ] Set up structured logging without sensitive data
+- [ ] Configure log rotation and secure storage
+- [ ] Implement monitoring and alerting
+- [ ] Set up anomaly detection
+- [ ] Create incident response procedures
+
+### 17. Integration Security
+
+ContextForge should be integrated with:
+
+- [ ] API Gateway for auth and rate limiting
+- [ ] Web Application Firewall (WAF)
+- [ ] Identity and Access Management (IAM)
+- [ ] SIEM for security monitoring
+- [ ] Load balancer with TLS termination
+
+### 18. Well-Known URI Security
+
+Configure well-known URIs appropriately for your deployment:
+
+```bash
+# For private APIs (default) - blocks all crawlers
+WELL_KNOWN_ENABLED=true
+WELL_KNOWN_ROBOTS_TXT="User-agent: *\nDisallow: /"
+
+# For public APIs - allow health checks, block sensitive endpoints
+# WELL_KNOWN_ROBOTS_TXT="User-agent: *\nAllow: /health\nAllow: /docs\nDisallow: /admin\nDisallow: /tools"
+
+# Security contact information (RFC 9116)
+WELL_KNOWN_SECURITY_TXT="Contact: mailto:security@example.com\nExpires: 2025-12-31T23:59:59Z\nPreferred-Languages: en"
+```
+
+Security considerations:
+
+- [ ] Configure security.txt with current contact information
+- [ ] Review robots.txt to prevent unauthorized crawler access
+- [ ] Monitor well-known endpoint access in logs
+- [ ] Update security.txt Expires field before expiration
+- [ ] Consider custom well-known files only if necessary
+
+### 19. Downstream Application Security
+
+Applications consuming ContextForge data must:
+
+- [ ] Validate all inputs from the gateway
+- [ ] Implement context-appropriate sanitization
+- [ ] Use Content Security Policy (CSP) headers
+- [ ] Escape data for output context (HTML, JS, SQL)
+- [ ] Implement their own authentication/authorization
+
+## 🔐 Environment Variables Reference
+
+### Security-Critical Settings
+
+```bash
+# Core Security
+MCPGATEWAY_UI_ENABLED=false              # Must be false in production
+MCPGATEWAY_ADMIN_API_ENABLED=false       # Must be false in production
+AUTH_REQUIRED=true                       # Enforce auth for every request
+API_ALLOW_BASIC_AUTH=false               # Keep disabled (use JWT instead)
+DOCS_ALLOW_BASIC_AUTH=false              # Keep disabled (use JWT instead)
+
+# Feature Flags (disable unused features)
+MCPGATEWAY_BULK_IMPORT_ENABLED=false
+MCPGATEWAY_A2A_ENABLED=false
+PUBLIC_REGISTRATION_ENABLED=false        # Disable user self-registration
+ALLOW_TEAM_CREATION=false               # Disable self-service team creation
+ALLOW_TEAM_JOIN_REQUESTS=false          # Disable self-service team joining
+ALLOW_TEAM_INVITATIONS=false            # Disable team invitations
+
+# Token Security
+REQUIRE_TOKEN_EXPIRATION=true            # Reject tokens without exp claim
+REQUIRE_JTI=true                         # Require JWT ID for revocation support
+
+# Network Security
+CORS_ENABLED=true
+ALLOWED_ORIGINS=https://your-domain.com
+SECURITY_HEADERS_ENABLED=true
+
+# Logging (no sensitive data)
+LOG_LEVEL=INFO               # Avoid DEBUG in production
+LOG_TO_FILE=false            # Disable file logging unless required
+LOG_ROTATION_ENABLED=false   # Enable only when log files are needed
+```
+
+> **Rate limiting:** ContextForge does not ship a built-in global rate limiter. Enforce
+> request throttling at an upstream ingress (NGINX, Envoy, API gateway) before traffic
+> reaches the service.
+
+## 🚀 Deployment Architecture
+
+### Recommended Production Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│                 │     │                 │     │                 │
+│   WAF/CDN       │────▶│  Load Balancer │────▶│   API Gateway   │
+│                 │     │   (TLS Term)    │     │  (Auth/Rate)    │
+└─────────────────┘     └─────────────────┘     └────────┬────────┘
+                                                          │
+                                                          ▼
+                                                 ┌─────────────────┐
+                                                 │                 │
+                                                 │  ContextForge    │
+                                                 │  (Internal)     │
+                                                 └────────┬────────┘
+                                                          │
+                              ┌───────────────────────────┼───────────────────────────┐
+                              │                           │                           │
+                              ▼                           ▼                           ▼
+                     ┌─────────────────┐        ┌─────────────────┐        ┌─────────────────┐
+                     │                 │        │                 │        │                 │
+                     │  Trusted MCP    │        │    Database     │        │     Redis       │
+                     │    Servers      │        │   (TLS/Auth)    │        │   (TLS/Auth)    │
+                     └─────────────────┘        └─────────────────┘        └─────────────────┘
+```
+
+## 🔍 Security Validation
+
+### Pre-Production Checklist
+
+1. **Run Security Scans**
+
+   ```bash
+   make security-all        # Run all security tools
+   make security-report     # Generate security report
+   make security-scan      # Show current local container review guidance
+   ```
+
+2. **Validate Configuration**
+   - Review all environment variables
+   - Confirm admin features disabled
+   - Verify authentication enabled
+   - Check TLS configuration
+   - Confirm `REQUIRE_JTI=true` for token tracking
+   - Confirm `REQUIRE_TOKEN_EXPIRATION=true`
+   - Confirm `PUBLIC_REGISTRATION_ENABLED=false`
+   - Confirm team governance flags are set appropriately
+
+3. **Test Security Controls**
+   - Attempt unauthorized access
+   - Verify rate limiting works
+   - Test input validation
+   - Check error handling
+
+4. **Review Dependencies**
+   ```bash
+   make pip-audit          # Check Python dependencies
+   make sbom              # Generate software bill of materials
+   ```
+
+## 📚 Additional Resources
+
+- [Security Policy](https://github.com/IBM/mcp-context-forge/blob/main/SECURITY.md) - Full security documentation
+- [Deployment Options](index.md) - Various deployment methods
+- [Environment Variables](configuration.md) - Complete configuration reference
+
+## ⚡ Quick Start Security Commands
+
+```bash
+# Development (with security checks)
+make security-all && make test && make run
+
+# Production build
+make docker-prod
+
+# Security audit
+make security-report
+```
+
+Remember: **Security is a shared responsibility**. ContextForge provides _some_ security controls, but you must properly configure and integrate it within a comprehensive security architecture.
