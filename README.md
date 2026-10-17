@@ -1,0 +1,123 @@
+# Private MCP Server — FastMCP 4.1
+
+Small self-hosted MCP server for **two manually managed user accounts**.
+No public registration, no GitHub/Google login, no ContextForge.
+
+- FastMCP 4.1.0 / Streamable HTTP at `/mcp`
+- First-party email/password login at `/login`
+- Native FastMCP OAuth 2.1 flow (DCR, PKCE, metadata)
+- PostgreSQL 18 storing Argon2id password hashes, OAuth clients, login transactions,
+  one-use authorization codes and SHA-256 hashes of opaque tokens
+- Single MCP container + one PostgreSQL container
+- Nginx HTTPS reverse proxy on the existing host, **not** a third container
+- Two example tools: `ping` and `whoami`
+
+## 1. Configure
+
+Use a Linux host with Docker Compose and an existing HTTPS Nginx virtual host.
+The public origin in this example is `https://mcp.cursurituv.ro`.
+
+```bash
+git clone https://github.com/cristake007/mcp.git
+cd mcp
+cp .env.example .env
+chmod 600 .env
+```
+
+Edit `.env` and replace **both** secrets with distinct random strings.
+Generate each with `openssl rand -hex 32`. `PUBLIC_BASE_URL` must exactly match the
+public HTTPS origin. Do not add `/mcp` to this variable.
+
+Do **not** put actual user passwords or email addresses in `.env` or Git.
+
+## 2. Start
+
+```bash
+docker compose config -q
+docker compose up -d --build
+docker compose ps
+curl -fsS http://127.0.0.1:4444/healthz
+```
+
+Expected response: `{"status":"ok"}`.
+
+Nginx on the host should proxy **all** paths of the MCP hostname to
+`http://127.0.0.1:4444`, not just `/mcp`. The OAuth discovery, `/register`,
+`/authorize`, `/token`, and `/login` paths are also required.
+See `nginx/README.md`.
+
+## 3. Add exactly two accounts
+
+Run each command interactively, supplying an email and a strong password
+(at least 12 characters). The CLI prompts for the password without echoing it.
+
+```bash
+docker compose exec mcp python -m app.manage add-user coleg1@firma.ro
+docker compose exec mcp python -m app.manage add-user coleg2@firma.ro
+docker compose exec mcp python -m app.manage list-users
+```
+
+Use **your real two email addresses** instead of the examples.
+
+To change a password (revokes that user's existing tokens), run `add-user`
+again using the same email address. To deactivate immediately:
+
+```bash
+docker compose exec mcp python -m app.manage disable-user coleg2@firma.ro
+```
+
+Disabled users can be re-enabled with `add-user`, using the same email.
+A disabled account still occupies one of the two slots.
+
+## 4. Connect ChatGPT
+
+After HTTPS is working:
+
+1. In ChatGPT, create or configure a custom remote MCP app/connector.
+2. URL: `https://mcp.cursurituv.ro/mcp`.
+3. Use the **OAuth** connection option. ChatGPT should open `/login`.
+4. Authenticate with one of the two manually created accounts.
+5. Approve the connection by submitting the login form.
+6. Try `ping` and `whoami`.
+
+Each ChatGPT account authenticates separately. Your MCP login email does **not**
+need to match the ChatGPT account email.
+
+Test OAuth discovery (a healthy 200 JSON response):
+
+```bash
+curl -i https://mcp.cursurituv.ro/.well-known/oauth-authorization-server
+curl -i https://mcp.cursurituv.ro/.well-known/oauth-protected-resource/mcp
+```
+
+If login isn't shown, check Nginx routing, valid TLS, Cloudflare rules
+(no browser-only challenge on protocol endpoints), and the OAuth metadata.
+The ChatGPT account must independently support custom MCP connectors/apps.
+
+## 5. Operations
+
+```bash
+docker compose logs -f --tail=100 mcp
+docker compose exec -T postgres pg_dump -U mcp -d mcp > mcp-backup.sql
+docker compose down
+```
+
+**Do not** run `docker compose down -v` unless you deliberately want to delete
+all database contents. Securely store backups: they contain account hashes
+and OAuth state. Database volumes persist across normal rebuilds.
+
+The application only publishes port `4444` on host loopback; the database
+is private to Docker. TLS terminates at host Nginx.
+
+## Security / readiness
+
+This is a **test deployment**, not a claim of audited production-grade identity
+infrastructure. Do not place sensitive data or high-privilege tools behind it
+before end-to-end OAuth testing and security review. The critical OAuth protocol
+routes and PKCE checks are delegated to FastMCP/MCP SDK; this application
+implements custom login, persistent tokens, limited-rate password verification,
+and token revocation.
+
+Production hardening before wider deployment: independent penetration test,
+monitoring, backups with restore tests, regular updates, and stricter client
+registration policy if other MCP clients are not wanted.
