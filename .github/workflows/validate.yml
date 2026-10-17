@@ -1,0 +1,35 @@
+name: Validate FastMCP project
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile Python sources
+        run: python -m compileall -q app
+      - name: Import application and check OAuth provider contract
+        env:
+          PUBLIC_BASE_URL: https://mcp.cursurituv.ro
+          LOGIN_COOKIE_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          DATABASE_URL: postgresql://mcp:unused@localhost:5432/mcp
+        run: |
+          python - <<'PY'
+          import inspect
+          from app.server import app, provider, mcp
+          assert not inspect.isabstract(type(provider))
+          paths = {route.path for route in app.routes}
+          assert "/mcp" in paths
+          assert "/login" in paths
+          assert "/healthz" in paths
+          print("FastMCP imports and OAuth provider methods OK")
+          PY
