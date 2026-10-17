@@ -1,0 +1,45 @@
+name: custom-mcp
+
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mcp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: mcp
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mcp -d mcp"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mcp:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4444:8000"
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set PUBLIC_BASE_URL in .env}
+      LOGIN_COOKIE_KEY: ${LOGIN_COOKIE_KEY:?Set LOGIN_COOKIE_KEY in .env}
+      DATABASE_URL: postgresql://mcp:${POSTGRES_PASSWORD}@postgres:5432/mcp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  postgres_data:
