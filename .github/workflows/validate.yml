@@ -8,6 +8,24 @@ on:
 jobs:
   python:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: mcp
+          POSTGRES_PASSWORD: local-ci-secret
+          POSTGRES_DB: mcp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mcp -d mcp"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PUBLIC_BASE_URL: https://mcp.cursurituv.ro
+      LOGIN_COOKIE_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      DATABASE_URL: postgresql://mcp:local-ci-secret@localhost:5432/mcp
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -16,20 +34,20 @@ jobs:
       - name: Install pinned dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile Python sources
-        run: python -m compileall -q app
-      - name: Import application and check OAuth provider contract
-        env:
-          PUBLIC_BASE_URL: https://mcp.cursurituv.ro
-          LOGIN_COOKIE_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-          DATABASE_URL: postgresql://mcp:unused@localhost:5432/mcp
+        run: python -m compileall -q app tests
+      - name: Import application and check provider
         run: |
           python - <<'PY'
           import inspect
-          from app.server import app, provider, mcp
+          from app.server import app, provider
           assert not inspect.isabstract(type(provider))
           paths = {route.path for route in app.routes}
           assert "/mcp" in paths
           assert "/login" in paths
           assert "/healthz" in paths
-          print("FastMCP imports and OAuth provider methods OK")
+          print("FastMCP imports OK")
           PY
+      - name: Smoke-test OAuth, MCP and token lifecycle
+        run: |
+          python -m app.manage init-db
+          python -m tests.smoke
