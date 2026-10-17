@@ -32,6 +32,11 @@ async def main():
             assert metadata.status_code == 200, (metadata.status_code, metadata.text)
             assert metadata.json()["token_endpoint"].endswith("/token")
 
+            resource = await client.get("/.well-known/oauth-protected-resource/mcp")
+            assert resource.status_code == 200, (resource.status_code, resource.text)
+            assert resource.json().get("authorization_servers"), resource.text
+            assert resource.json().get("resource", "").endswith("/mcp"), resource.text
+
             registration = await client.post("/register", json={
                 "client_name": "MCP OAuth smoke test",
                 "redirect_uris": [redirect_uri],
