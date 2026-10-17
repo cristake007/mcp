@@ -32,7 +32,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install pinned dependencies
-        run: python -m pip install -r requirements.txt
+        run: python -m pip install -r requirements.txt httpx==0.28.1
       - name: Compile Python sources
         run: python -m compileall -q app tests
       - name: Import application and check provider
