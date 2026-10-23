@@ -1,42 +1,12 @@
-# Example HTTP vhost for initial Certbot issuance on Ubuntu/Debian.
-# Install webserver/nginx-limits.conf.example in /etc/nginx/conf.d/mcp-security.conf
-# and webserver/nginx-proxy.inc.example in /etc/nginx/snippets/mcp-proxy.inc
-# BEFORE enabling this file. Both includes must exist.
-#
-# IMPORTANT: After 'certbot --nginx -d mcp.example.com', ensure the SAME
-# locations, access_log format and controls exist in the HTTPS server block.
-# Do not overwrite an existing Certbot-managed production SSL vhost.
+# HTTP-only bootstrap example: for production HTTPS use Certbot, then add
+# 'include /etc/nginx/snippets/mcp-hardening.inc;' inside the TLS server {}.
+# Keep the existing catch-all location and Certbot-managed directives.
 server {
     listen 80;
     listen [::]:80;
     server_name mcp.example.com;
 
-    access_log /var/log/nginx/mcp.access.log mcp_no_query;
-    limit_req_status 429;
-
-    location = /login {
-        limit_req zone=mcp_login_ip burst=40 nodelay;
-        client_max_body_size 16k;
-        include /etc/nginx/snippets/mcp-proxy.inc;
-    }
-
-    location = /register {
-        limit_req zone=mcp_register_ip burst=10 nodelay;
-        client_max_body_size 16k;
-        include /etc/nginx/snippets/mcp-proxy.inc;
-    }
-
-    location = /authorize {
-        limit_req zone=mcp_token_ip burst=40 nodelay;
-        include /etc/nginx/snippets/mcp-proxy.inc;
-    }
-
-    location = /token {
-        limit_req zone=mcp_token_ip burst=40 nodelay;
-        client_max_body_size 16k;
-        include /etc/nginx/snippets/mcp-proxy.inc;
-    }
-
+    include /etc/nginx/snippets/mcp-hardening.inc;
     location / {
         client_max_body_size 2m;
         include /etc/nginx/snippets/mcp-proxy.inc;
