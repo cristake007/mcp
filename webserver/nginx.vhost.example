@@ -1,24 +1,44 @@
-# Example HOST Nginx vhost for a Docker-backed MCP server.
-# Copy to /etc/nginx/sites-available/mcp.example.com and replace the hostname.
-# Certbot --nginx will add HTTPS configuration to this file.
-# Do not expose 127.0.0.1:4444 publicly and do not proxy /mcp alone.
-
+# Example HTTP vhost for initial Certbot issuance on Ubuntu/Debian.
+# Install webserver/nginx-limits.conf.example in /etc/nginx/conf.d/mcp-security.conf
+# and webserver/nginx-proxy.inc.example in /etc/nginx/snippets/mcp-proxy.inc
+# BEFORE enabling this file. Both includes must exist.
+#
+# IMPORTANT: After 'certbot --nginx -d mcp.example.com', ensure the SAME
+# locations, access_log format and controls exist in the HTTPS server block.
+# Do not overwrite an existing Certbot-managed production SSL vhost.
 server {
     listen 80;
     listen [::]:80;
     server_name mcp.example.com;
 
-    location / {
-        proxy_pass http://127.0.0.1:4444;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header Connection "";
-        proxy_buffering off;
-        proxy_read_timeout 300s;
+    access_log /var/log/nginx/mcp.access.log mcp_no_query;
+    limit_req_status 429;
+
+    location = /login {
+        limit_req zone=mcp_login_ip burst=40 nodelay;
         client_max_body_size 16k;
+        include /etc/nginx/snippets/mcp-proxy.inc;
+    }
+
+    location = /register {
+        limit_req zone=mcp_register_ip burst=10 nodelay;
+        client_max_body_size 16k;
+        include /etc/nginx/snippets/mcp-proxy.inc;
+    }
+
+    location = /authorize {
+        limit_req zone=mcp_token_ip burst=40 nodelay;
+        include /etc/nginx/snippets/mcp-proxy.inc;
+    }
+
+    location = /token {
+        limit_req zone=mcp_token_ip burst=40 nodelay;
+        client_max_body_size 16k;
+        include /etc/nginx/snippets/mcp-proxy.inc;
+    }
+
+    location / {
+        client_max_body_size 2m;
+        include /etc/nginx/snippets/mcp-proxy.inc;
     }
 }
