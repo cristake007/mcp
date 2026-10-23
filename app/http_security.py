@@ -72,7 +72,13 @@ class TokenResourceGuard:
             )
             return await response(scope, receive, send)
 
+        replayed = False
+
         async def replay():
-            return {"type": "http.request", "body": bytes(body), "more_body": False}
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return await receive()
 
         await self.app(scope, replay, send)
