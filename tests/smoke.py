@@ -140,6 +140,7 @@ async def main():
                         WHERE code_hash=%s""",
                         (code, digest(code)),
                     )
+                    await cur.execute("DELETE FROM schema_migrations WHERE version=1")
             await init_db()
             async with connection() as conn:
                 async with conn.cursor() as cur:
@@ -181,6 +182,7 @@ async def main():
                             WHERE token_hash=%s AND kind=%s""",
                             (raw, digest(raw), kind),
                         )
+                    await cur.execute("DELETE FROM schema_migrations WHERE version=1")
             await init_db()
             async with connection() as conn:
                 async with conn.cursor() as cur:
