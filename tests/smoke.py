@@ -18,6 +18,10 @@ from app.server import app
 
 async def main():
     await set_user("oauth-smoke@example.org", "A-Strong-Temporary-Passphrase-2026!")
+    # Allowlists are created exclusively by the administrator; no hardcoded
+    # two-account limit should prevent a small team from signing in.
+    await set_user("oauth-smoke-two@example.org", "A-Strong-Temporary-Passphrase-2026!")
+    await set_user("oauth-smoke-three@example.org", "A-Strong-Temporary-Passphrase-2026!")
     verifier = secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(
         hashlib.sha256(verifier.encode()).digest()
