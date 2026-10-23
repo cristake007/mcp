@@ -190,7 +190,7 @@ sudo docker compose ps
 sudo docker compose logs -f --tail=100 mcp
 sudo systemctl status nginx
 sudo nginx -t
-sudo ./ops/backup.sh  # from the repo root; see ops/README.md
+sudo bash ops/backup.sh  # from the repo root; see ops/README.md
 ```
 
 Run Docker Compose commands from the project root (where `compose.yaml` is).
