@@ -106,6 +106,22 @@ async def main():
             assert blocked.status_code == 400, (blocked.status_code, blocked.text)
             os.environ.pop("OAUTH_ALLOWED_REDIRECT_HOSTS")
 
+            for missing_or_wrong_resource in (None, "https://evil.example/mcp"):
+                params_bad = {
+                    "response_type": "code",
+                    "client_id": client_id,
+                    "redirect_uri": redirect_uri,
+                    "state": "invalid-resource-test",
+                    "code_challenge": challenge,
+                    "code_challenge_method": "S256",
+                }
+                if missing_or_wrong_resource is not None:
+                    params_bad["resource"] = missing_or_wrong_resource
+                denied = await client.get("/authorize", params=params_bad)
+                assert denied.status_code == 302, denied.text
+                denied_query = parse_qs(urlparse(denied.headers["location"]).query)
+                assert denied_query.get("error") == ["invalid_target"], denied_query
+
             authorization = await client.get("/authorize", params={
                 "response_type": "code",
                 "client_id": client_id,
