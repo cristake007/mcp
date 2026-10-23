@@ -25,48 +25,42 @@ files under `/var/backups/mcp`. It validates the archive header/TOC using
 
 Do **not** store database backups under a public web directory or inside Git.
 
-## Daily scheduling on the VPS
+## Daily scheduling with systemd (recommended)
 
-Get your actual repository path:
+After your first successful manual backup, configure two built-in systemd
+timers: a **daily PostgreSQL backup** around 03:00 and **expired OAuth
+record cleanup** around 04:00 (both in the VPS timezone; each can be delayed
+by up to 10 minutes). Missed runs are retried on the next boot.
+No new app containers or paid services are required.
 
-```bash
-pwd
-```
-
-Create a root cron file; replace `/opt/mcp` with that absolute repository
-path, and do not use `~` in cron:
-
-```bash
-sudo nano /etc/cron.d/mcp-backup
-```
-
-Example contents (runs each day at 03:00 in the host's timezone):
-
-```cron
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-0 3 * * * root /bin/bash /opt/mcp/ops/backup.sh >> /var/log/mcp-backup.log 2>&1
-0 4 * * * root /usr/bin/docker compose --project-directory /opt/mcp -f /opt/mcp/compose.yaml exec -T mcp python -m app.manage cleanup >> /var/log/mcp-maintenance.log 2>&1
-```
-
-Then:
+From the checked-out repository root:
 
 ```bash
-sudo chmod 0644 /etc/cron.d/mcp-backup
-sudo bash /opt/mcp/ops/backup.sh
-sudo tail -n 20 /var/log/mcp-backup.log
+sudo bash ops/install-maintenance.sh
+sudo systemctl start mcp-db-backup.service
+sudo systemctl status mcp-db-backup.service --no-pager
+sudo systemctl list-timers 'mcp-*' --all
 ```
 
-You can change the destination with `MCP_BACKUP_DIR` and local retention
-with `MCP_BACKUP_RETENTION_DAYS` (default 14 days), set in the cron entry
-or execution environment. The script only removes matching older backup files.
+The installer generates root-owned systemd unit and timer files. It refuses
+to overwrite units it does not manage and does not restart Nginx, PostgreSQL
+or the running MCP application. The backup's standard destination is
+`/var/backups/mcp`, with mode `0700`; each archive is private to root.
+You can change `MCP_BACKUP_DIR` and `MCP_BACKUP_RETENTION_DAYS` through
+service environment overrides, if required; by default archives older than
+14 full days are removed **after a successful new backup**.
 
-**A backup on the same VPS is not sufficient for disaster recovery.**
-Copy backups to a different host/storage with encryption at rest and
-restricted access; configure failure monitoring. If the VPS is destroyed,
-same-host backups are lost. Keep the `.env` secrets in a **separate, encrypted**
-off-server recovery store; never commit them to Git or include passwords in
-support tickets.
+Review recent jobs:
+
+```bash
+sudo journalctl -u mcp-db-backup.service -u mcp-oauth-cleanup.service -n 50 --no-pager
+sudo systemctl list-timers 'mcp-*' --all
+```
+
+If you previously configured `/etc/cron.d/mcp-backup`, disable that
+duplicate cron schedule before enabling these timers. Backup failures
+are recorded in journald; **they are not delivered as automatic alerts**
+unless monitoring is separately configured.
 
 ## Optional encrypted offsite backup (strongly recommended)
 
@@ -115,12 +109,10 @@ The script verifies the newest local archive checksum and uses restic's
 built-in encryption. It does **not** delete remote snapshots; add a separately
 reviewed restic retention policy when remote storage is selected.
 
-After setup, you may add to `/etc/cron.d/mcp-backup` (backup at 03:00,
-offsite upload at 03:30; edit `/opt/mcp` to the actual repository directory):
-
-```cron
-30 3 * * * root /bin/bash /opt/mcp/ops/offsite-restic.sh >> /var/log/mcp-offsite.log 2>&1
-```
+After configuring and verifying the offsite repository, schedule an
+independent offsite upload (e.g., via a separate root-owned systemd timer
+after the daily local backup). Do not enable unattended uploads before the
+offsite destination and recovery password have been tested.
 
 Check remote snapshots and repository integrity:
 
