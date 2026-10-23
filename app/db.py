@@ -141,6 +141,9 @@ async def get_active_user_id(email: str, password: str, ip: str):
                 "UPDATE users SET failures=0, locked_until=NULL WHERE id=%s",
                 (user["id"],)
             )
+            # Successful authentication must not consume the IP brute-force
+            # budget, especially when colleagues share one office NAT address.
+            await cur.execute("DELETE FROM login_attempts WHERE ip=%s", (ip,))
             return user["id"]
 
 
