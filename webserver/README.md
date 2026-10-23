@@ -116,61 +116,61 @@ Expect `{"status":"ok"}`. If it fails, use
 `sudo docker compose logs --tail=100 mcp` and
 `sudo docker compose logs --tail=100 postgres`.
 
-## 5. Install and enable the Nginx vhost
+## 5. Harden Nginx without touching existing TLS
 
-The production-oriented example includes per-IP request limits for
-`/login`, `/register`, `/authorize` and `/token`, plus query-free access
-logs (so login tickets and authorization query parameters are not logged).
+For an existing working Certbot-managed HTTPS site, DO NOT overwrite
+`/etc/nginx/sites-available/...` with the example HTTP vhost.
 
-First install two shared Nginx snippets:
-
-```bash
-sudo install -m 0644 webserver/nginx-limits.conf.example /etc/nginx/conf.d/mcp-security.conf
-sudo install -d -m 0755 /etc/nginx/snippets
-sudo install -m 0644 webserver/nginx-proxy.inc.example /etc/nginx/snippets/mcp-proxy.inc
-```
-
-The `conf.d` file must be included under Nginx's `http {}` block (standard
-Ubuntu/Debian packaging does this). The proxy include is reusable within each
-`location`. Never let clients send untrusted `X-Real-IP` directly to MCP:
-Nginx must overwrite that header, and port 4444 must stay loopback-only.
-
-For a new hostname/vhost (before running Certbot):
+From the MCP repository root:
 
 ```bash
-sudo cp webserver/nginx.vhost.example /etc/nginx/sites-available/mcp.example.com
-sudo nano /etc/nginx/sites-available/mcp.example.com
+sudo bash ops/prepare-nginx.sh
 ```
 
-Replace **every** `mcp.example.com` with your real hostname. Then:
+The script installs the following snippets, verifies Nginx syntax, and leaves
+your existing Certbot/TLS and catch-all `location /` unchanged:
 
-```bash
-sudo ln -s /etc/nginx/sites-available/mcp.example.com /etc/nginx/sites-enabled/mcp.example.com
-sudo nginx -t && sudo systemctl reload nginx
-curl -i http://mcp.example.com/healthz
+- `/etc/nginx/conf.d/mcp-security.conf`: request-limit zones and log format
+  that does not record OAuth query strings
+- `/etc/nginx/snippets/mcp-proxy.inc`: existing upstream, host and real-IP
+  forwarding settings shared by exact-match OAuth routes
+- `/etc/nginx/snippets/mcp-hardening.inc`: rate limits for login, client
+  registration and OAuth token/authorization endpoints, plus safe access logs
+
+In the **existing HTTPS** `server {}` block for the MCP hostname, add
+**one line** (outside any `location {}`):
+
+```nginx
+include /etc/nginx/snippets/mcp-hardening.inc;
 ```
 
-Use the actual edited hostname in each path and command.
+Do **not** insert it in the HTTP redirect-only server, in `http {}`, or in
+the existing `location /`. Do not duplicate it across the same server block.
 
-**Existing Certbot HTTPS vhost:** DO NOT overwrite it with the HTTP example or
-create a second `server_name` block. Instead, first install the two snippet
-files above, then **merge** the five `location` blocks, the `access_log` with
-`mcp_no_query` and `limit_req_status 429` from
-[`nginx.vhost.example`](nginx.vhost.example) into the existing HTTPS
-`server {}` block. Replace its old catch-all `location /` rather than adding
-a duplicate. Ensure the HTTP block still redirects to HTTPS.
-
-After modifying an existing HTTPS vhost, ALWAYS run:
+Validate before applying:
 
 ```bash
 sudo nginx -t && sudo systemctl reload nginx
 curl -fsS https://mcp.example.com/healthz
 ```
 
-A `429 Too Many Requests` response after repeated attempts is expected.
-Tune rates for legitimate office NAT traffic instead of disabling login
-protection. Do not log `$request` / `$request_uri` for OAuth endpoints:
-the default combined Nginx format includes query strings.
+If Nginx validation fails, remove the newly added include line and rerun
+`nginx -t`. The snippet preparation script does not activate the limits on
+its own. This deliberate separation protects the working TLS configuration.
+
+The login rate is 10 requests/min/IP (burst up to 40 requests). Since
+colleagues may share a corporate NAT address, tune this only if legitimate
+users encounter HTTP 429 responses.
+
+With the hardening snippet active, Nginx uses `mcp_no_query` for the site's
+access log. The default Nginx `combined` format contains `$request`, which
+can expose temporary OAuth tickets and authorization parameters. The app also
+disables Uvicorn URL access logging.
+
+For a **new** site without Certbot, use `webserver/nginx.vhost.example` only
+after running `ops/prepare-nginx.sh`. Replace the placeholder hostname, test,
+then issue certificates as described below. Existing sites should not repeat
+the initial Certbot issuance.
 
 ## 6. Issue the HTTPS certificate
 
