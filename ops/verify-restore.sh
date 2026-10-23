@@ -54,8 +54,7 @@ docker exec "$name" pg_restore --exit-on-error --single-transaction \
   /tmp/mcp-restore.dump
 docker exec "$name" psql -U postgres -d mcp_restore_check \
   -v ON_ERROR_STOP=1 -Atc \
-  "SELECT 'users=' || count(*) FROM users;" \
-  | sed -E 's/^(users=).*/\\1[verified]/'
+  "SELECT count(*) FROM users;" >/dev/null
 docker exec "$name" psql -U postgres -d mcp_restore_check \
   -v ON_ERROR_STOP=1 -Atc \
   "SELECT count(*) = 5 FROM information_schema.tables
