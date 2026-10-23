@@ -86,6 +86,47 @@ docker compose exec mcp python -m app.manage disable-user coleg2@firma.ro
 Disabled users can be re-enabled with `add-user`, using the same email.
 There is no hardcoded two-account limit.
 
+### Restrict OAuth clients before handling sensitive data
+
+The server intentionally supports OAuth Dynamic Client Registration (used by MCP
+clients). User accounts are still **local**: merely knowing the MCP URL never
+grants access. However, an attacker could attempt to register a malicious
+client and ask an employee to approve it. For a private deployment, restrict
+callback hosts after confirming which clients are genuinely in use.
+
+After your first successful ChatGPT connection, list the *registered callback
+URLs* (admin-only; do not publish these details):
+
+```bash
+docker compose exec mcp python -m app.manage list-clients
+```
+
+In `.env`, set `OAUTH_ALLOWED_REDIRECT_HOSTS` to a comma-separated list of
+**exact hostnames** from trusted clients; do not enter full URLs, paths,
+wildcards, ports, or example values. Include loopback `127.0.0.1` only if
+your desktop client genuinely uses it. Example only:
+
+```dotenv
+OAUTH_ALLOWED_REDIRECT_HOSTS=chatgpt.com,127.0.0.1
+```
+
+`chatgpt.com` is **not** guaranteed to be the actual callback host:
+use `list-clients`, not guesses. Blank/unset means compatibility mode with
+any valid HTTPS (or loopback HTTP) callback and is **not production-hardened**.
+Once configured, run `docker compose up -d` to apply the setting and test
+a **new** ChatGPT authorization. Existing OAuth tokens are not automatically
+revoked just because the allowed hosts change.
+
+For a deliberate, one-time credential cutover that logs out **everybody**:
+
+```bash
+docker compose exec mcp python -m app.manage revoke-all-sessions --yes-revoke-everyone
+```
+
+Run that command only after warning colleagues they must reconnect. The login
+form also displays the actual callback **hostname** as an anti-impersonation
+measure; displayed client names alone are not proof of client identity.
+
 ## 4. Connect ChatGPT
 
 After HTTPS is working:
@@ -112,6 +153,21 @@ If login isn't shown, check Nginx routing, valid TLS, Cloudflare rules
 The ChatGPT account must independently support custom MCP connectors/apps.
 
 ## 5. Operations
+
+### Scheduled database maintenance
+
+Expired authorization tickets, codes, bearer token records and login attempt
+counters must be deleted periodically:
+
+```bash
+docker compose exec mcp python -m app.manage cleanup
+```
+
+Schedule this daily using root cron or a systemd timer; see
+[`ops/README.md`](ops/README.md). This does not delete legitimate unexpired
+sessions. The login credentials database still requires separate encrypted
+off-VPS backups and **restore tests**.
+
 
 ```bash
 docker compose logs -f --tail=100 mcp
