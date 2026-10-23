@@ -1,4 +1,4 @@
-"""Manage the two private accounts. Run through docker compose exec mcp."""
+"""Manage locally provisioned private accounts. Run through docker compose exec mcp."""
 import argparse
 import asyncio
 import getpass
@@ -19,14 +19,6 @@ async def set_user(email: str, password: str) -> None:
     hashed = PasswordHasher().hash(password)
     async with connection() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("SELECT pg_advisory_xact_lock(857393)")
-            await cur.execute("SELECT 1 FROM users WHERE email=%s", (email,))
-            exists = await cur.fetchone()
-            if not exists:
-                await cur.execute("SELECT count(*) AS n FROM users")
-                count = (await cur.fetchone())["n"]
-                if count >= 2:
-                    raise ValueError("Maximum two users. Disable does not free a slot.")
             await cur.execute(
                 """INSERT INTO users(email,password_hash) VALUES (%s,%s)
                 ON CONFLICT(email) DO UPDATE SET password_hash=EXCLUDED.password_hash,
