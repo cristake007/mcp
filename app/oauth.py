@@ -26,6 +26,7 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from psycopg.types.json import Jsonb
 
 from app.db import connection
+from app.http_security import same_resource
 
 
 def digest(raw: str) -> str:
@@ -78,6 +79,7 @@ class DatabaseOAuthProvider(OAuthProvider):
             base_url=base_url,
             client_registration_options=ClientRegistrationOptions(enabled=True),
         )
+        self.resource_url = base_url.rstrip("/") + "/mcp"
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         async with connection() as conn:
@@ -110,12 +112,15 @@ class DatabaseOAuthProvider(OAuthProvider):
             raise AuthorizeError("invalid_request", "Registered client and PKCE are required")
         if not approved_redirect(str(params.redirect_uri)):
             raise AuthorizeError("unauthorized_client", "OAuth callback host is not permitted")
+        if not params.resource or not same_resource(params.resource, self.resource_url):
+            raise AuthorizeError("invalid_target", "Unknown or missing MCP resource")
         ticket = secrets.token_urlsafe(36)
         payload = {
             "redirect_uri": str(params.redirect_uri),
             "redirect_uri_provided_explicitly": params.redirect_uri_provided_explicitly,
             "scopes": params.scopes or [],
             "code_challenge": params.code_challenge,
+            "resource": self.resource_url,
             "state": params.state,
         }
         async with connection() as conn:
@@ -165,6 +170,7 @@ class DatabaseOAuthProvider(OAuthProvider):
                     scopes=params["scopes"],
                     expires_at=time.time() + 300,
                     code_challenge=params["code_challenge"],
+                    resource=params.get("resource", self.resource_url),
                 )
                 await cur.execute(
                     """INSERT INTO oauth_codes(code_hash, client_id, user_id, data, expires_at)
@@ -199,6 +205,7 @@ class DatabaseOAuthProvider(OAuthProvider):
             client_id=client_id,
             scopes=scopes,
             expires_at=int(time.time() + access_ttl),
+            resource=self.resource_url,
             claims={"sub": str(user_id)},
         )
         refresh_info = RefreshToken(
@@ -206,6 +213,7 @@ class DatabaseOAuthProvider(OAuthProvider):
             client_id=client_id,
             scopes=scopes,
             expires_at=int(time.time() + refresh_ttl),
+            resource=self.resource_url,
         )
         async with conn.cursor() as cur:
             await cur.execute(
@@ -231,6 +239,8 @@ class DatabaseOAuthProvider(OAuthProvider):
     async def exchange_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
     ) -> OAuthToken:
+        if authorization_code.resource and not same_resource(authorization_code.resource, self.resource_url):
+            raise TokenError("invalid_target", "Authorization code has wrong audience")
         async with connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -275,6 +285,8 @@ class DatabaseOAuthProvider(OAuthProvider):
         scopes: list[str],
     ) -> OAuthToken:
         granted = scopes or refresh_token.scopes
+        if refresh_token.resource and not same_resource(refresh_token.resource, self.resource_url):
+            raise TokenError("invalid_target", "Refresh token has wrong audience")
         if not set(granted).issubset(set(refresh_token.scopes)):
             raise TokenError("invalid_scope", "Cannot increase refresh token scopes")
         async with connection() as conn:
@@ -297,7 +309,16 @@ class DatabaseOAuthProvider(OAuthProvider):
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         row = await self._lookup_token(token, "access")
-        return AccessToken.model_validate({**row["data"], "token": token}) if row else None
+        if not row:
+            return None
+        stored_resource = row["data"].get("resource")
+        if stored_resource and not same_resource(stored_resource, self.resource_url):
+            return None
+        # Legacy opaque tokens predate RFC 8707 binding. They were issued only
+        # for this sole MCP endpoint; their scope is preserved until expiration.
+        return AccessToken.model_validate({
+            **row["data"], "resource": self.resource_url, "token": token,
+        })
 
     async def verify_token(self, token: str) -> AccessToken | None:
         return await self.load_access_token(token)
