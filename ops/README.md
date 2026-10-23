@@ -149,6 +149,32 @@ sudo sha256sum -c mcp-YYYYMMDDTHHMMSSZ-NNN.dump.sha256
 
 Replace the sample filename with a real file listed in the backup directory.
 
+## Restore verification on the VPS (without touching live PostgreSQL)
+
+Once a manual backup is created, run this safe restore drill:
+
+```bash
+sudo bash ops/verify-restore.sh
+```
+
+The script selects the most recent archive under `/var/backups/mcp`, validates
+its checksum and **fully restores it into a disposable PostgreSQL 18
+container** using Docker `--network none` (no listening ports, no production
+volumes). It verifies the expected tables before deleting the disposable
+container. It does not change the live `mcp` database or revoke sessions.
+
+A full restore consumes disk space and CPU. Run it during a quiet period,
+check free disk space first, and review the exit status. For an explicit
+backup path:
+
+```bash
+sudo bash ops/verify-restore.sh /var/backups/mcp/mcp-DATE.dump
+```
+
+This proves the archive can be restored on the current VPS, **not** that a
+destroyed VPS can be recovered. Still test recovery on a second machine
+using an actual offsite backup and a separately secured restic key.
+
 ## Restore drill (on an isolated test instance)
 
 **Never test restoration by overwriting the live production database.**
