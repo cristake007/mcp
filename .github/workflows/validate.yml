@@ -43,11 +43,12 @@ jobs:
           sudo install -m 0644 webserver/nginx-limits.conf.example /etc/nginx/conf.d/mcp-security.conf
           sudo install -d -m 0755 /etc/nginx/snippets
           sudo install -m 0644 webserver/nginx-proxy.inc.example /etc/nginx/snippets/mcp-proxy.inc
+          sudo install -m 0644 webserver/nginx-hardening.inc.example /etc/nginx/snippets/mcp-hardening.inc
           sudo install -m 0644 webserver/nginx.vhost.example /etc/nginx/sites-available/mcp-example
           sudo ln -s /etc/nginx/sites-available/mcp-example /etc/nginx/sites-enabled/mcp-example
           sudo nginx -t
       - name: Validate operations scripts
-        run: bash -n ops/backup.sh ops/offsite-restic.sh
+        run: bash -n ops/backup.sh ops/offsite-restic.sh ops/install-maintenance.sh ops/prepare-nginx.sh
       - name: Compile Python sources
         run: python -m compileall -q app tests
       - name: Import application and check provider
