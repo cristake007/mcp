@@ -66,6 +66,15 @@ async def init_db() -> None:
     async with connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(SCHEMA)
+            # Non-destructive, idempotent migration for databases created by
+            # older versions that stored bearer tokens and codes in JSONB.
+            # The raw value is reconstructed from the OAuth request on lookup.
+            await cur.execute(
+                "UPDATE oauth_tokens SET data = data - 'token' WHERE data ? 'token'"
+            )
+            await cur.execute(
+                "UPDATE oauth_codes SET data = data - 'code' WHERE data ? 'code'"
+            )
 
 
 async def healthy() -> bool:
