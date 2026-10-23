@@ -5,15 +5,18 @@ PKCE and redirect URI validation). This module handles authentication, consent,
 persistent storage, revocation and refresh-token rotation.
 """
 import hashlib
+import os
 import secrets
 import time
 import uuid
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from fastmcp.server.auth.auth import AccessToken, OAuthProvider
 from mcp.server.auth.provider import (
     AuthorizationCode,
     AuthorizationParams,
+    AuthorizeError,
+    RegistrationError,
     RefreshToken,
     TokenError,
     construct_redirect_uri,
@@ -40,6 +43,33 @@ def _without_credential(model, field: str) -> dict:
     return data
 
 
+def allowed_redirect_hosts() -> frozenset[str]:
+    """Exact hostnames only; empty means compatibility mode (not hardened)."""
+    configured = os.environ.get("OAUTH_ALLOWED_REDIRECT_HOSTS", "")
+    hosts = frozenset(host.strip().lower() for host in configured.split(",") if host.strip())
+    if any("://" in host or "/" in host or ":" in host or "*" in host for host in hosts):
+        raise ValueError("OAUTH_ALLOWED_REDIRECT_HOSTS must contain only exact hostnames")
+    return hosts
+
+
+def approved_redirect(uri: str) -> bool:
+    parsed = urlsplit(uri)
+    try:
+        host = (parsed.hostname or "").lower()
+        port = parsed.port  # Access also validates malformed ports.
+    except ValueError:
+        return False
+    if not host or parsed.username or parsed.password or parsed.fragment:
+        return False
+    loopback = host in {"localhost", "127.0.0.1", "::1"}
+    if not ((parsed.scheme == "https" and not loopback) or
+            (parsed.scheme == "http" and loopback)):
+        return False
+    # Production can enable an explicit allowlist after observing ChatGPT's
+    # registered callback host(s) with the admin-only list-clients command.
+    return not allowed_redirect_hosts() or host in allowed_redirect_hosts()
+
+
 class DatabaseOAuthProvider(OAuthProvider):
     """One-provider OAuth server; clients and token state survive restarts."""
 
@@ -61,6 +91,10 @@ class DatabaseOAuthProvider(OAuthProvider):
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         if not client_info.client_id:
             raise ValueError("Missing client_id")
+        if not client_info.redirect_uris or any(
+            not approved_redirect(str(uri)) for uri in client_info.redirect_uris
+        ):
+            raise RegistrationError("invalid_redirect_uri", "OAuth callback host is not permitted")
         async with connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -73,7 +107,9 @@ class DatabaseOAuthProvider(OAuthProvider):
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
         if not client.client_id or not params.code_challenge:
-            raise ValueError("Registered client and PKCE S256 are required")
+            raise AuthorizeError("invalid_request", "Registered client and PKCE are required")
+        if not approved_redirect(str(params.redirect_uri)):
+            raise AuthorizeError("unauthorized_client", "OAuth callback host is not permitted")
         ticket = secrets.token_urlsafe(36)
         payload = {
             "redirect_uri": str(params.redirect_uri),
