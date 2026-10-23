@@ -33,6 +33,13 @@ def _as_json(model) -> dict:
     return model.model_dump(mode="json")
 
 
+def _without_credential(model, field: str) -> dict:
+    """Persist OAuth metadata, never the bearer credential or one-use code."""
+    data = _as_json(model)
+    data.pop(field, None)
+    return data
+
+
 class DatabaseOAuthProvider(OAuthProvider):
     """One-provider OAuth server; clients and token state survive restarts."""
 
@@ -126,7 +133,7 @@ class DatabaseOAuthProvider(OAuthProvider):
                 await cur.execute(
                     """INSERT INTO oauth_codes(code_hash, client_id, user_id, data, expires_at)
                     VALUES (%s,%s,%s,%s,now() + interval '5 minutes')""",
-                    (digest(code), client_id, user_id, Jsonb(_as_json(auth_code))),
+                    (digest(code), client_id, user_id, Jsonb(_without_credential(auth_code, "code"))),
                 )
         return construct_redirect_uri(
             params["redirect_uri"], code=code, state=params.get("state")
@@ -144,7 +151,7 @@ class DatabaseOAuthProvider(OAuthProvider):
                     (digest(authorization_code), client.client_id),
                 )
                 row = await cur.fetchone()
-                return AuthorizationCode.model_validate(row["data"]) if row else None
+                return AuthorizationCode.model_validate({**row["data"], "code": authorization_code}) if row else None
 
     async def _issue_pair(self, conn, client_id: str, user_id, scopes: list[str]) -> OAuthToken:
         access = secrets.token_urlsafe(48)
@@ -169,13 +176,13 @@ class DatabaseOAuthProvider(OAuthProvider):
                 """INSERT INTO oauth_tokens
                 (token_hash,kind,client_id,user_id,pair_id,data,expires_at)
                 VALUES (%s,'access',%s,%s,%s,%s,now() + interval '1 hour')""",
-                (digest(access), client_id, user_id, pair, Jsonb(_as_json(token_info))),
+                (digest(access), client_id, user_id, pair, Jsonb(_without_credential(token_info, "token"))),
             )
             await cur.execute(
                 """INSERT INTO oauth_tokens
                 (token_hash,kind,client_id,user_id,pair_id,data,expires_at)
                 VALUES (%s,'refresh',%s,%s,%s,%s,now() + interval '30 days')""",
-                (digest(refresh), client_id, user_id, pair, Jsonb(_as_json(refresh_info))),
+                (digest(refresh), client_id, user_id, pair, Jsonb(_without_credential(refresh_info, "token"))),
             )
         return OAuthToken(
             access_token=access,
@@ -225,7 +232,7 @@ class DatabaseOAuthProvider(OAuthProvider):
         self, client: OAuthClientInformationFull, refresh_token: str
     ) -> RefreshToken | None:
         row = await self._lookup_token(refresh_token, "refresh", client.client_id)
-        return RefreshToken.model_validate(row["data"]) if row else None
+        return RefreshToken.model_validate({**row["data"], "token": refresh_token}) if row else None
 
     async def exchange_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: RefreshToken,
@@ -254,7 +261,7 @@ class DatabaseOAuthProvider(OAuthProvider):
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         row = await self._lookup_token(token, "access")
-        return AccessToken.model_validate(row["data"]) if row else None
+        return AccessToken.model_validate({**row["data"], "token": token}) if row else None
 
     async def verify_token(self, token: str) -> AccessToken | None:
         return await self.load_access_token(token)
