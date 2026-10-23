@@ -1,0 +1,50 @@
+name: mcp-rag
+
+services:
+  database:
+    image: pgvector/pgvector:0.8.7-pg18-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: rag
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: ${RAG_DB_PASSWORD:?Create rag/.env with a strong RAG_DB_PASSWORD}
+    volumes:
+      - rag_pgdata:/var/lib/postgresql
+    networks: [rag_private]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  cli:
+    profiles: [tools]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PGHOST: database
+      PGPORT: "5432"
+      PGDATABASE: rag
+      PGUSER: rag
+      PGPASSWORD: ${RAG_DB_PASSWORD:?Create rag/.env with a strong RAG_DB_PASSWORD}
+      RAG_DOCUMENTS: /documents
+      FASTEMBED_CACHE_PATH: /model-cache
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      OMP_NUM_THREADS: "2"
+    volumes:
+      - ./documents:/documents:ro
+      - model_cache:/model-cache
+    depends_on:
+      database:
+        condition: service_healthy
+    networks: [rag_private]
+    restart: "no"
+
+networks:
+  rag_private:
+    driver: bridge
+
+volumes:
+  rag_pgdata:
+  model_cache:
