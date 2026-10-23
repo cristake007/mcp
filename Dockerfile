@@ -7,4 +7,4 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 COPY app ./app
 USER mcp
 EXPOSE 8000
-CMD ["sh", "-c", "python -m app.manage init-db && exec uvicorn app.server:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1"]
+CMD ["sh", "-c", "python -m app.manage init-db && exec uvicorn app.server:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1 --no-access-log"]
