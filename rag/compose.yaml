@@ -29,6 +29,7 @@ services:
       PGUSER: rag
       PGPASSWORD: ${RAG_DB_PASSWORD:?Create rag/.env with a strong RAG_DB_PASSWORD}
       RAG_DOCUMENTS: /documents
+      RAG_EMBEDDINGS_ENABLED: ${RAG_EMBEDDINGS_ENABLED:-1}
       FASTEMBED_CACHE_PATH: /model-cache
       HF_HUB_DISABLE_TELEMETRY: "1"
       OMP_NUM_THREADS: "2"
