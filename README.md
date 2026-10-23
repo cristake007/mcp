@@ -60,7 +60,7 @@ Expected response: `{"status":"ok"}`.
 Nginx on the host should proxy **all** paths of the MCP hostname to
 `http://127.0.0.1:4444`, not just `/mcp`. The OAuth discovery, `/register`,
 `/authorize`, `/token`, and `/login` paths are also required.
-See `nginx/README.md`.
+For step-by-step VPS deployment (Docker, DNS, Nginx, Certbot, OAuth), see [`webserver/README.md`](webserver/README.md) and the [Nginx vhost example](webserver/nginx.vhost.example). Shared cPanel hosting is not supported.
 
 ## 3. Add exactly two accounts
 
