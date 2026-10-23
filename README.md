@@ -24,9 +24,25 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Edit `.env` and replace **both** secrets with distinct random strings.
-Generate each with `openssl rand -hex 32`. `PUBLIC_BASE_URL` must exactly match the
-public HTTPS origin. Do not add `/mcp` to this variable.
+Generate two different secrets using OpenSSL (run these commands separately):
+
+```bash
+openssl rand -hex 32
+openssl rand -hex 32
+```
+
+Open `.env` in a text editor (for example, `nano .env`) and set:
+
+```dotenv
+PUBLIC_BASE_URL=https://mcp.cursurituv.ro
+POSTGRES_PASSWORD=<paste the first generated secret here>
+LOGIN_COOKIE_KEY=<paste the second generated secret here>
+```
+
+Replace the placeholders (including angle brackets) with the generated values.
+The two secrets must be different; never commit the real `.env` to Git.
+`PUBLIC_BASE_URL` must exactly match your public HTTPS origin, without `/mcp`
+or a trailing slash. Save the file before starting Docker Compose.
 
 Do **not** put actual user passwords or email addresses in `.env` or Git.
 
