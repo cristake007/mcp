@@ -93,7 +93,7 @@ After HTTPS is working:
 1. In ChatGPT, create or configure a custom remote MCP app/connector.
 2. URL: `https://mcp.cursurituv.ro/mcp`.
 3. Use the **OAuth** connection option. ChatGPT should open `/login`.
-4. Authenticate with one of the two manually created accounts.
+4. Authenticate with an administrator-managed local account.
 5. Approve the connection by submitting the login form.
 6. Try `ping` and `whoami`.
 
@@ -130,9 +130,9 @@ is private to Docker. TLS terminates at host Nginx.
 
 ## Security / readiness
 
-This is **not yet an audited production deployment**, despite the added backup and credential-storage hardening. Production-grade identity
-infrastructure. Do not place sensitive data or high-privilege tools behind it
-before end-to-end OAuth testing and security review. The critical OAuth protocol
+This is **not yet an audited production deployment**, despite the added backup
+and credential-storage hardening. Do not place sensitive data or high-privilege
+tools behind it before end-to-end OAuth testing and security review. The critical OAuth protocol
 routes and PKCE checks are delegated to FastMCP/MCP SDK; this application
 implements custom login, persistent tokens, limited-rate password verification,
 and token revocation.
