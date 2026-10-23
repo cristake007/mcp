@@ -1,0 +1,14 @@
+# Install as /etc/nginx/conf.d/mcp-security.conf
+# Debian/Ubuntu Nginx includes conf.d/*.conf in its http {} context.
+# Never paste these directives into a server {} or location {} block.
+
+# Shared corporate NAT IPs can legitimately issue bursts at login.
+limit_req_zone $binary_remote_addr zone=mcp_login_ip:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=mcp_register_ip:10m rate=5r/m;
+limit_req_zone $binary_remote_addr zone=mcp_token_ip:10m rate=120r/m;
+
+# Do not log query strings: /login?ticket=... and /authorize?... are sensitive.
+# The default combined format records $request, including query strings.
+log_format mcp_no_query '$remote_addr [$time_local] '
+    '"$request_method $uri $server_protocol" $status '
+    '$body_bytes_sent "$http_user_agent" $request_time';
