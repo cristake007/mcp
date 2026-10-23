@@ -14,11 +14,15 @@ import httpx
 from app.manage import set_user, disable_user, cleanup, list_clients
 from app.db import connection, init_db
 from app.oauth import digest, approved_redirect
+from app.http_security import same_resource
 from app.server import app, get_login_ip
 from starlette.requests import Request
 
 
 async def main():
+    assert same_resource("https://MCP.cursurituv.ro/mcp", "https://mcp.cursurituv.ro/mcp")
+    assert not same_resource("https://evil.example/mcp", "https://mcp.cursurituv.ro/mcp")
+    assert not same_resource("https://mcp.cursurituv.ro/mcp?anything=1", "https://mcp.cursurituv.ro/mcp")
     assert approved_redirect("https://chatgpt.com/callback")
     assert not approved_redirect("http://example.com/callback")
     assert not approved_redirect("https://good.example@evil.example/callback")
@@ -63,6 +67,13 @@ async def main():
             follow_redirects=False,
             timeout=20,
         ) as client:
+            host_rejected = await client.get("/healthz", headers={"Host": "evil.example"})
+            assert host_rejected.status_code == 421, host_rejected.text
+            origin_rejected = await client.get("/healthz", headers={"Origin": "https://evil.example"})
+            assert origin_rejected.status_code == 403, origin_rejected.text
+            origin_accepted = await client.get("/healthz", headers={"Origin": "https://mcp.cursurituv.ro"})
+            assert origin_accepted.status_code == 200, origin_accepted.text
+
             metadata = await client.get("/.well-known/oauth-authorization-server")
             assert metadata.status_code == 200, (metadata.status_code, metadata.text)
             assert metadata.json()["token_endpoint"].endswith("/token")
@@ -102,6 +113,7 @@ async def main():
                 "state": "smoke-csrf",
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
+                "resource": "https://mcp.cursurituv.ro/mcp",
             })
             assert authorization.status_code in (302, 303, 307), (authorization.status_code, authorization.text)
             login_url = authorization.headers["location"]
@@ -151,16 +163,39 @@ async def main():
                     stored = await cur.fetchone()
                     assert stored and "code" not in stored["data"]
 
-            token = await client.post("/token", data={
+            wrong_resource = await client.post("/token", data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "client_id": client_id,
+                "code_verifier": verifier,
+                "redirect_uri": redirect_uri,
+                "resource": "https://evil.example/mcp",
+            })
+            assert wrong_resource.status_code == 400, wrong_resource.text
+            assert wrong_resource.json()["error"] == "invalid_target"
+
+            missing_resource = await client.post("/token", data={
                 "grant_type": "authorization_code",
                 "code": code,
                 "client_id": client_id,
                 "code_verifier": verifier,
                 "redirect_uri": redirect_uri,
             })
+            assert missing_resource.status_code == 400
+            assert missing_resource.json()["error"] == "invalid_target"
+
+            token = await client.post("/token", data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "client_id": client_id,
+                "code_verifier": verifier,
+                "redirect_uri": redirect_uri,
+                "resource": "https://mcp.cursurituv.ro/mcp",
+            })
             assert token.status_code == 200, (token.status_code, token.text)
             credentials = token.json()
             assert credentials["access_token"] and credentials["refresh_token"]
+            assert (await app.state.fastmcp_auth.load_access_token(credentials["access_token"])).resource == "https://mcp.cursurituv.ro/mcp"
 
             async with connection() as conn:
                 async with conn.cursor() as cur:
@@ -219,10 +254,40 @@ async def main():
             assert rpc.status_code == 200, (rpc.status_code, rpc.text)
             assert "result" in rpc.json(), rpc.text
 
+            # A DB token record with the wrong audience must never authenticate.
+            async with connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """UPDATE oauth_tokens SET data=jsonb_set(data, '{resource}', to_jsonb(%s::text))
+                        WHERE token_hash=%s AND kind='access'""",
+                        ("https://evil.example/mcp", digest(credentials["access_token"])),
+                    )
+            wrong_audience = await client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 99, "method": "tools/list", "params": {},
+            })
+            assert wrong_audience.status_code == 401, wrong_audience.text
+            async with connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """UPDATE oauth_tokens SET data=jsonb_set(data, '{resource}', to_jsonb(%s::text))
+                        WHERE token_hash=%s AND kind='access'""",
+                        ("https://mcp.cursurituv.ro/mcp", digest(credentials["access_token"])),
+                    )
+
+            wrong_refresh_target = await client.post("/token", data={
+                "grant_type": "refresh_token",
+                "client_id": client_id,
+                "refresh_token": credentials["refresh_token"],
+                "resource": "https://evil.example/mcp",
+            })
+            assert wrong_refresh_target.status_code == 400
+            assert wrong_refresh_target.json()["error"] == "invalid_target"
+
             refresh = await client.post("/token", data={
                 "grant_type": "refresh_token",
                 "client_id": client_id,
                 "refresh_token": credentials["refresh_token"],
+                "resource": "https://mcp.cursurituv.ro/mcp",
             })
             assert refresh.status_code == 200, (refresh.status_code, refresh.text)
             assert refresh.json()["access_token"] != credentials["access_token"]
