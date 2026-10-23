@@ -118,32 +118,59 @@ Expect `{"status":"ok"}`. If it fails, use
 
 ## 5. Install and enable the Nginx vhost
 
-From the repository root:
+The production-oriented example includes per-IP request limits for
+`/login`, `/register`, `/authorize` and `/token`, plus query-free access
+logs (so login tickets and authorization query parameters are not logged).
+
+First install two shared Nginx snippets:
+
+```bash
+sudo install -m 0644 webserver/nginx-limits.conf.example /etc/nginx/conf.d/mcp-security.conf
+sudo install -d -m 0755 /etc/nginx/snippets
+sudo install -m 0644 webserver/nginx-proxy.inc.example /etc/nginx/snippets/mcp-proxy.inc
+```
+
+The `conf.d` file must be included under Nginx's `http {}` block (standard
+Ubuntu/Debian packaging does this). The proxy include is reusable within each
+`location`. Never let clients send untrusted `X-Real-IP` directly to MCP:
+Nginx must overwrite that header, and port 4444 must stay loopback-only.
+
+For a new hostname/vhost (before running Certbot):
 
 ```bash
 sudo cp webserver/nginx.vhost.example /etc/nginx/sites-available/mcp.example.com
 sudo nano /etc/nginx/sites-available/mcp.example.com
 ```
 
-Replace **every** `mcp.example.com` with your real hostname. The vhost
-proxies **all routes**, not only `/mcp`. If you already have a vhost for the
-same hostname, merge the proxy `location /` into it instead of enabling
-duplicate `server_name` blocks.
+Replace **every** `mcp.example.com` with your real hostname. Then:
 
 ```bash
 sudo ln -s /etc/nginx/sites-available/mcp.example.com /etc/nginx/sites-enabled/mcp.example.com
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-If you named the vhost file after your actual hostname, use that exact filename
-in both commands above.
-
-Test HTTP routing (before requesting HTTPS):
-
-```bash
+sudo nginx -t && sudo systemctl reload nginx
 curl -i http://mcp.example.com/healthz
 ```
+
+Use the actual edited hostname in each path and command.
+
+**Existing Certbot HTTPS vhost:** DO NOT overwrite it with the HTTP example or
+create a second `server_name` block. Instead, first install the two snippet
+files above, then **merge** the five `location` blocks, the `access_log` with
+`mcp_no_query` and `limit_req_status 429` from
+[`nginx.vhost.example`](nginx.vhost.example) into the existing HTTPS
+`server {}` block. Replace its old catch-all `location /` rather than adding
+a duplicate. Ensure the HTTP block still redirects to HTTPS.
+
+After modifying an existing HTTPS vhost, ALWAYS run:
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+curl -fsS https://mcp.example.com/healthz
+```
+
+A `429 Too Many Requests` response after repeated attempts is expected.
+Tune rates for legitimate office NAT traffic instead of disabling login
+protection. Do not log `$request` / `$request_uri` for OAuth endpoints:
+the default combined Nginx format includes query strings.
 
 ## 6. Issue the HTTPS certificate
 
