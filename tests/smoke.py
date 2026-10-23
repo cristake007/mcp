@@ -5,19 +5,34 @@ No external identity provider, server socket, or sensitive user emails required.
 import asyncio
 import base64
 import hashlib
+import os
 import secrets
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-from app.manage import set_user, disable_user
+from app.manage import set_user, disable_user, cleanup, list_clients
 from app.db import connection, init_db
-from app.oauth import digest
+from app.oauth import digest, approved_redirect
 from app.server import app, get_login_ip
 from starlette.requests import Request
 
 
 async def main():
+    assert approved_redirect("https://chatgpt.com/callback")
+    assert not approved_redirect("http://example.com/callback")
+    assert not approved_redirect("https://good.example@evil.example/callback")
+    old_redirect_allowlist = os.environ.get("OAUTH_ALLOWED_REDIRECT_HOSTS")
+    os.environ["OAUTH_ALLOWED_REDIRECT_HOSTS"] = "chatgpt.com,127.0.0.1"
+    assert approved_redirect("https://chatgpt.com/callback")
+    assert approved_redirect("http://127.0.0.1:8989/callback")
+    assert not approved_redirect("https://chatgpt.com.evil.com/callback")
+    assert not approved_redirect("https://attacker.example/callback")
+    if old_redirect_allowlist is None:
+        os.environ.pop("OAUTH_ALLOWED_REDIRECT_HOSTS")
+    else:
+        os.environ["OAUTH_ALLOWED_REDIRECT_HOSTS"] = old_redirect_allowlist
+
     trusted_proxy_request = Request({
         "type": "http",
         "client": ("172.18.0.1", 12345),
@@ -67,6 +82,19 @@ async def main():
             assert registration.status_code in (200, 201), (registration.status_code, registration.text)
             client_id = registration.json()["client_id"]
 
+            # Explicit redirect allowlists reject dynamically registered
+            # malicious callback targets with an OAuth registration error.
+            os.environ["OAUTH_ALLOWED_REDIRECT_HOSTS"] = "chatgpt.com,127.0.0.1"
+            blocked = await client.post("/register", json={
+                "client_name": "Impersonated ChatGPT",
+                "redirect_uris": ["https://attacker.example/callback"],
+                "grant_types": ["authorization_code"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
+            })
+            assert blocked.status_code == 400, (blocked.status_code, blocked.text)
+            os.environ.pop("OAUTH_ALLOWED_REDIRECT_HOSTS")
+
             authorization = await client.get("/authorize", params={
                 "response_type": "code",
                 "client_id": client_id,
@@ -81,6 +109,8 @@ async def main():
 
             page = await client.get(login_url)
             assert page.status_code == 200
+            assert "127.0.0.1" in page.text
+            assert "Destinația autorizării:" in page.text
             ticket = parse_qs(urlparse(login_url).query)["ticket"][0]
             signed_in = await client.post("/login", data={
                 "ticket": ticket,
@@ -203,7 +233,8 @@ async def main():
             })
             assert rejected.status_code in (401, 403), (rejected.status_code, rejected.text)
 
-    print("PASS: OAuth discovery, DCR, PKCE, login, token issuance, one-use code, MCP, refresh, revocation")
+    await cleanup()
+    print("PASS: OAuth discovery, DCR, redirect allowlist, PKCE, login, token issuance, one-use code, MCP, refresh, revocation")
 
 
 if __name__ == "__main__":
