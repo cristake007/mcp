@@ -115,7 +115,7 @@ The ChatGPT account must independently support custom MCP connectors/apps.
 
 ```bash
 docker compose logs -f --tail=100 mcp
-sudo ./ops/backup.sh
+sudo bash ops/backup.sh
 docker compose down
 ```
 
