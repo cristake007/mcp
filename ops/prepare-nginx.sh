@@ -54,8 +54,23 @@ if ! nginx -t; then
   exit 1
 fi
 
-echo "Nginx snippets installed and syntax verified."
-echo "NOT YET ACTIVE on an existing HTTPS vhost: add this single line"
-echo "inside your MCP hostname's existing HTTPS server {}:"
+echo
+echo "Nginx snippets installed and syntax verified. NO NGINX RULES HAVE BEEN ACTIVATED YET."
+echo
+echo "IMPORTANT: DO NOT open or edit /etc/nginx/snippets/mcp-hardening.inc."
+echo "That file is the snippet TO BE INCLUDED. Never include a file inside itself."
+echo
+echo "STEP 1: Find your existing Nginx HTTPS virtual-host configuration:"
+echo "    sudo grep -Rnl 'server_name' /etc/nginx/sites-available/"
+echo
+echo "STEP 2: Open the file containing YOUR MCP DOMAIN under /etc/nginx/sites-available/."
+echo "Find its server { ... } block with 'listen 443 ssl' or 'listen 443 ssl http2'."
+echo "Inside THAT HTTPS server block, OUTSIDE every location { ... }, add:"
 echo "    include /etc/nginx/snippets/mcp-hardening.inc;"
-echo "Then run: sudo nginx -t && sudo systemctl reload nginx"
+echo
+echo "STEP 3: Test, reload and verify:"
+echo "    sudo nginx -t && sudo systemctl reload nginx"
+echo "    curl -fsS https://YOUR-MCP-DOMAIN/healthz"
+echo
+echo "Do NOT add this include to the HTTP/80 redirect-only server block."
+echo "Do NOT overwrite your Certbot-generated TLS configuration."
