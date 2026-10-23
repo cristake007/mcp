@@ -17,6 +17,10 @@ async def connection() -> AsyncIterator[psycopg.AsyncConnection]:
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   email TEXT NOT NULL UNIQUE,
@@ -65,16 +69,24 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 async def init_db() -> None:
     async with connection() as conn:
         async with conn.cursor() as cur:
+            # Serializes startup migrations if multiple app instances boot.
+            await cur.execute("SELECT pg_advisory_xact_lock(857394)")
             await cur.execute(SCHEMA)
-            # Non-destructive, idempotent migration for databases created by
-            # older versions that stored bearer tokens and codes in JSONB.
-            # The raw value is reconstructed from the OAuth request on lookup.
             await cur.execute(
-                "UPDATE oauth_tokens SET data = data - 'token' WHERE data ? 'token'"
+                "SELECT 1 FROM schema_migrations WHERE version = 1"
             )
-            await cur.execute(
-                "UPDATE oauth_codes SET data = data - 'code' WHERE data ? 'code'"
-            )
+            if not await cur.fetchone():
+                # Baseline migration for earlier installations: remove OAuth
+                # credentials from JSONB without invalidating hashed tokens.
+                await cur.execute(
+                    "UPDATE oauth_tokens SET data = data - 'token' WHERE data ? 'token'"
+                )
+                await cur.execute(
+                    "UPDATE oauth_codes SET data = data - 'code' WHERE data ? 'code'"
+                )
+                await cur.execute(
+                    "INSERT INTO schema_migrations(version) VALUES (1)"
+                )
 
 
 async def healthy() -> bool:
