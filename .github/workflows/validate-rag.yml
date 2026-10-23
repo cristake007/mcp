@@ -49,3 +49,29 @@ jobs:
         run: python -m compileall -q rag/ragcore rag/tests
       - name: Verify fidelity and PostgreSQL integration
         run: python -m unittest discover -s rag/tests -v
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    env:
+      RAG_DB_PASSWORD: ci-only-rag-secret
+      RAG_EMBEDDINGS_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare sample documents
+        run: |
+          mkdir -p rag/documents/subfolder
+          printf 'ISO 9001 Articolul 15 păstrare 10 ani\n' > rag/documents/subfolder/procedure.txt
+      - name: Build isolated RAG image
+        run: docker compose -f rag/compose.yaml build cli
+      - name: Start ONLY the RAG database
+        run: docker compose -f rag/compose.yaml up -d database
+      - name: Run independent RAG lifecycle
+        run: |
+          docker compose -f rag/compose.yaml run --rm cli init
+          docker compose -f rag/compose.yaml run --rm cli scan --lexical-only
+          docker compose -f rag/compose.yaml run --rm cli verify
+          docker compose -f rag/compose.yaml run --rm cli status
+          docker compose -f rag/compose.yaml run --rm cli search --lexical-only 'ISO 9001' | grep -F subfolder/procedure.txt
+      - name: Stop RAG stack
+        if: always()
+        run: docker compose -f rag/compose.yaml down
