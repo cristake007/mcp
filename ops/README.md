@@ -45,14 +45,15 @@ Example contents (runs each day at 03:00 in the host's timezone):
 ```cron
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-0 3 * * * root /opt/mcp/ops/backup.sh >> /var/log/mcp-backup.log 2>&1
+0 3 * * * root /bin/bash /opt/mcp/ops/backup.sh >> /var/log/mcp-backup.log 2>&1
+0 4 * * * root /usr/bin/docker compose --project-directory /opt/mcp -f /opt/mcp/compose.yaml exec -T mcp python -m app.manage cleanup >> /var/log/mcp-maintenance.log 2>&1
 ```
 
 Then:
 
 ```bash
 sudo chmod 0644 /etc/cron.d/mcp-backup
-sudo /opt/mcp/ops/backup.sh
+sudo bash /opt/mcp/ops/backup.sh
 sudo tail -n 20 /var/log/mcp-backup.log
 ```
 
@@ -66,6 +67,86 @@ restricted access; configure failure monitoring. If the VPS is destroyed,
 same-host backups are lost. Keep the `.env` secrets in a **separate, encrypted**
 off-server recovery store; never commit them to Git or include passwords in
 support tickets.
+
+## Optional encrypted offsite backup (strongly recommended)
+
+The local snapshot is **not** protected against VPS loss, disk failure or host
+compromise. For production, use a second storage location (another Linux
+host, an SFTP backup service, or an existing restic-compatible encrypted
+repository). No external **authentication provider** is required by MCP:
+offsite storage is a separate operations concern.
+
+Install restic and prepare a root-only encryption password:
+
+```bash
+sudo apt install -y restic
+sudo install -d -m 0700 /root/.config/mcp
+sudo sh -c 'umask 077; openssl rand -base64 48 > /root/.config/mcp/restic-password'
+sudo install -m 0600 /dev/null /etc/mcp-offsite.env
+sudo nano /etc/mcp-offsite.env
+```
+
+Example `/etc/mcp-offsite.env` (replace destination with **your** backup
+server and configured SSH account):
+
+```bash
+RESTIC_REPOSITORY=sftp:backupuser@backup.example.com:/backups/mcp
+RESTIC_PASSWORD_FILE=/root/.config/mcp/restic-password
+```
+
+The remote SFTP account must have write access to the target directory;
+configure root's SSH key authentication and **verify the remote SSH host key**
+before running restic. Do not disable SSH host-key checking. Ensure the
+configuration file is owned by root and mode `0600`.
+
+Initialize that destination once:
+
+```bash
+sudo bash -c 'set -a; source /etc/mcp-offsite.env; set +a; restic init'
+```
+
+Run the encrypted upload after a successful local backup:
+
+```bash
+sudo bash ops/offsite-restic.sh
+```
+
+The script verifies the newest local archive checksum and uses restic's
+built-in encryption. It does **not** delete remote snapshots; add a separately
+reviewed restic retention policy when remote storage is selected.
+
+After setup, you may add to `/etc/cron.d/mcp-backup` (backup at 03:00,
+offsite upload at 03:30; edit `/opt/mcp` to the actual repository directory):
+
+```cron
+30 3 * * * root /bin/bash /opt/mcp/ops/offsite-restic.sh >> /var/log/mcp-offsite.log 2>&1
+```
+
+Check remote snapshots and repository integrity:
+
+```bash
+sudo bash -c 'set -a; source /etc/mcp-offsite.env; set +a; restic snapshots'
+sudo bash -c 'set -a; source /etc/mcp-offsite.env; set +a; restic check'
+```
+
+**Test a restic restore to an isolated directory**, then separately test a
+PostgreSQL restore to an isolated database. Keep the restic password and SSH
+recovery key in a separate secure location; losing them can make remote
+snapshots irrecoverable.
+
+If backup or upload fails, the cron log must be checked and the failure
+addressed. Set up monitoring/alerts appropriate to your VPS before claiming
+unattended backup protection.
+
+## Existing backups from pre-hardening releases
+
+Earlier MCP releases stored usable OAuth tokens in PostgreSQL JSONB. A
+backup created **before** the credential-scrubbing database migration may
+therefore contain those raw credentials. Protect or securely retire old
+backups. After updating and validating login, consider using the explicit
+admin `revoke-all-sessions --yes-revoke-everyone` command to invalidate
+previous sessions; this forces colleagues to reconnect ChatGPT. Do not
+delete your only recovery copy before creating and testing a replacement.
 
 ## Verify backup integrity
 
