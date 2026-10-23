@@ -6,3 +6,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 .idea/
+
+# RAG source documents are private; never commit them.
+rag/documents/
