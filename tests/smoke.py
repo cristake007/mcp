@@ -11,6 +11,8 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from app.manage import set_user, disable_user
+from app.db import connection, init_db
+from app.oauth import digest
 from app.server import app
 
 
@@ -74,6 +76,32 @@ async def main():
             assert params["state"][0] == "smoke-csrf"
             code = params["code"][0]
 
+            # Existing databases may contain legacy plaintext credentials in JSONB.
+            # The startup migration must scrub them without invalidating the code.
+            async with connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT data FROM oauth_codes WHERE code_hash=%s",
+                        (digest(code),),
+                    )
+                    stored = await cur.fetchone()
+                    assert stored and "code" not in stored["data"]
+                    await cur.execute(
+                        """UPDATE oauth_codes
+                        SET data=jsonb_set(data, '{code}', to_jsonb(%s::text))
+                        WHERE code_hash=%s""",
+                        (code, digest(code)),
+                    )
+            await init_db()
+            async with connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT data FROM oauth_codes WHERE code_hash=%s",
+                        (digest(code),),
+                    )
+                    stored = await cur.fetchone()
+                    assert stored and "code" not in stored["data"]
+
             token = await client.post("/token", data={
                 "grant_type": "authorization_code",
                 "code": code,
@@ -84,6 +112,37 @@ async def main():
             assert token.status_code == 200, (token.status_code, token.text)
             credentials = token.json()
             assert credentials["access_token"] and credentials["refresh_token"]
+
+            async with connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT kind,data FROM oauth_tokens WHERE token_hash IN (%s,%s)",
+                        (digest(credentials["access_token"]), digest(credentials["refresh_token"])),
+                    )
+                    saved = await cur.fetchall()
+                    assert len(saved) == 2
+                    assert all("token" not in row["data"] for row in saved)
+                    # Verify the scrub also works for legacy active tokens.
+                    for kind, raw in (
+                        ("access", credentials["access_token"]),
+                        ("refresh", credentials["refresh_token"]),
+                    ):
+                        await cur.execute(
+                            """UPDATE oauth_tokens
+                            SET data=jsonb_set(data, '{token}', to_jsonb(%s::text))
+                            WHERE token_hash=%s AND kind=%s""",
+                            (raw, digest(raw), kind),
+                        )
+            await init_db()
+            async with connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT data FROM oauth_tokens WHERE token_hash IN (%s,%s)",
+                        (digest(credentials["access_token"]), digest(credentials["refresh_token"])),
+                    )
+                    saved = await cur.fetchall()
+                    assert len(saved) == 2
+                    assert all("token" not in row["data"] for row in saved)
 
             repeated = await client.post("/token", data={
                 "grant_type": "authorization_code",
