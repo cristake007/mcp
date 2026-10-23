@@ -13,6 +13,7 @@ from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, R
 from starlette.routing import Route
 
 from app.db import get_active_user_id, healthy, user_for_token
+from app.http_security import TokenResourceGuard
 from app.oauth import DatabaseOAuthProvider, digest
 
 BASE_URL = os.environ["PUBLIC_BASE_URL"].rstrip("/")
@@ -166,7 +167,18 @@ async def index(_request: Request):
     return PlainTextResponse("TUV Private MCP. Endpoint: /mcp")
 
 
-app = mcp.http_app(path="/mcp", stateless_http=True, json_response=True)
+# FastMCP 4.1 native DNS-rebinding guard: validate Host and Origin for every
+# route, not only /mcp. Health checks use container-local loopback.
+app = mcp.http_app(
+    path="/mcp",
+    stateless_http=True,
+    json_response=True,
+    host_origin_protection=True,
+    allowed_hosts=[parsed.hostname, "127.0.0.1", "localhost"],
+    allowed_origins=[BASE_URL],
+)
+# The underlying SDK does not enforce the resource field at /token.
+app.add_middleware(TokenResourceGuard, resource_url=BASE_URL + "/mcp")
 app.routes.extend([
     Route("/login", get_login, methods=["GET"]),
     Route("/login", post_login, methods=["POST"]),
