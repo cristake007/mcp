@@ -13,10 +13,24 @@ import httpx
 from app.manage import set_user, disable_user
 from app.db import connection, init_db
 from app.oauth import digest
-from app.server import app
+from app.server import app, get_login_ip
+from starlette.requests import Request
 
 
 async def main():
+    trusted_proxy_request = Request({
+        "type": "http",
+        "client": ("172.18.0.1", 12345),
+        "headers": [(b"x-real-ip", b"203.0.113.42")],
+    })
+    assert get_login_ip(trusted_proxy_request) == "203.0.113.42"
+    untrusted_peer_request = Request({
+        "type": "http",
+        "client": ("8.8.8.8", 12345),
+        "headers": [(b"x-real-ip", b"1.2.3.4")],
+    })
+    assert get_login_ip(untrusted_peer_request) == "8.8.8.8"
+
     await set_user("oauth-smoke@example.org", "A-Strong-Temporary-Passphrase-2026!")
     # Allowlists are created exclusively by the administrator; no hardcoded
     # two-account limit should prevent a small team from signing in.
