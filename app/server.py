@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import html
 import os
+from ipaddress import ip_address
 from urllib.parse import urlparse
 
 from fastmcp import FastMCP
@@ -105,6 +106,25 @@ async def get_login(request: Request):
     return response
 
 
+def get_login_ip(request: Request) -> str:
+    """Use the IP supplied by the trusted host reverse proxy.
+
+    The MCP container is reachable only on host loopback and its private Docker
+    network. Our host Nginx overwrites X-Real-IP with the actual remote address.
+    Never use this header if the container is publicly exposed without a
+    trusted reverse proxy.
+    """
+    peer = request.client.host if request.client else "unknown"
+    try:
+        if ip_address(peer).is_private:
+            forwarded = request.headers.get("x-real-ip", "")
+            if forwarded:
+                return str(ip_address(forwarded))
+    except ValueError:
+        pass
+    return peer
+
+
 async def post_login(request: Request):
     async with request.form(max_fields=5, max_files=0) as form:
         ticket = str(form.get("ticket") or "")
@@ -118,7 +138,7 @@ async def post_login(request: Request):
     pending = await provider.pending(ticket)
     if not pending:
         return PlainTextResponse("Sesiunea a expirat. Reîncearcă din ChatGPT.", status_code=400)
-    ip = request.client.host if request.client else "unknown"
+    ip = get_login_ip(request)
     user_id = await get_active_user_id(email, password, ip)
     if user_id is None:
         return page(ticket, pending["client"].get("client_name") or "MCP client", error="invalid")
