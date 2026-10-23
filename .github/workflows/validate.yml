@@ -46,8 +46,8 @@ jobs:
           sudo install -m 0644 webserver/nginx.vhost.example /etc/nginx/sites-available/mcp-example
           sudo ln -s /etc/nginx/sites-available/mcp-example /etc/nginx/sites-enabled/mcp-example
           sudo nginx -t
-      - name: Validate backup script syntax
-        run: bash -n ops/backup.sh
+      - name: Validate operations scripts
+        run: bash -n ops/backup.sh ops/offsite-restic.sh
       - name: Compile Python sources
         run: python -m compileall -q app tests
       - name: Import application and check provider
