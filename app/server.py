@@ -52,9 +52,11 @@ def login_cookie(ticket: str) -> str:
     ).hexdigest()
 
 
-def page(ticket: str, client_name: str, error: str = "") -> HTMLResponse:
+def page(ticket: str, client_name: str, redirect_uri: str, error: str = "") -> HTMLResponse:
     safe_ticket = html.escape(ticket, quote=True)
     safe_client = html.escape(client_name or "MCP client")
+    callback_host = urlparse(redirect_uri).hostname or "necunoscut"
+    safe_callback = html.escape(callback_host)
     message = '<p class="error">Email sau parolă incorectă ori cont blocat temporar.</p>' if error else ""
     body = f"""<!doctype html>
 <html lang="ro"><head>
@@ -75,6 +77,7 @@ small{{display:block;margin-top:18px;color:#687589}}
 <body><main>
 <h1>Autentificare MCP</h1>
 <p>Conectare securizată pentru <strong>{safe_client}</strong>. Prin autentificare autorizezi accesul acestui client la instrumentele MCP.</p>
+<p>Destinația autorizării: <strong>{safe_callback}</strong>. Verifică destinația înainte să introduci parola.</p>
 {message}
 <form method="post" action="/login" autocomplete="on">
 <input type="hidden" name="ticket" value="{safe_ticket}">
@@ -97,7 +100,7 @@ async def get_login(request: Request):
     if not pending:
         return PlainTextResponse("Sesiunea de autorizare este invalidă sau expirată.", status_code=400)
     client_name = pending["client"].get("client_name") or "MCP client"
-    response = page(ticket, client_name)
+    response = page(ticket, client_name, pending["data"]["redirect_uri"])
     response.set_cookie(
         "mcp_login_challenge", login_cookie(ticket),
         max_age=600, path="/login", secure=parsed.scheme == "https",
@@ -141,7 +144,7 @@ async def post_login(request: Request):
     ip = get_login_ip(request)
     user_id = await get_active_user_id(email, password, ip)
     if user_id is None:
-        return page(ticket, pending["client"].get("client_name") or "MCP client", error="invalid")
+        return page(ticket, pending["client"].get("client_name") or "MCP client", pending["data"]["redirect_uri"], error="invalid")
     redirect_url = await provider.complete_login(ticket, user_id)
     if not redirect_url:
         return PlainTextResponse("Sesiunea a expirat. Reîncearcă din ChatGPT.", status_code=400)
