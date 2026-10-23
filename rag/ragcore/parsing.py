@@ -21,19 +21,26 @@ class Unit:
 
 @dataclass
 class Parsed:
-    raw_text: str = ""
     units: list[Unit] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     parser: str = ""
+    _parts: list[str] = field(default_factory=list, repr=False)
+    _length: int = field(default=0, repr=False)
+
+    @property
+    def raw_text(self) -> str:
+        return "".join(self._parts)
 
     def append(self, text: str, source: dict[str, Any]) -> None:
         if not text:
             return
-        if self.raw_text:
-            self.raw_text += "\n"
-        start = len(self.raw_text)
-        self.raw_text += text
-        self.units.append(Unit(start, len(self.raw_text), source))
+        if self._parts:
+            self._parts.append("\n")
+            self._length += 1
+        start = self._length
+        self._parts.append(text)
+        self._length += len(text)
+        self.units.append(Unit(start, self._length, source))
 
 
 def parse_file(path: Path) -> Parsed:
