@@ -1,0 +1,51 @@
+name: Validate independent RAG
+
+on:
+  push:
+    paths:
+      - "rag/**"
+      - ".github/workflows/validate-rag.yml"
+  pull_request:
+    paths:
+      - "rag/**"
+      - ".github/workflows/validate-rag.yml"
+
+jobs:
+  rag:
+    runs-on: ubuntu-latest
+    services:
+      database:
+        image: pgvector/pgvector:0.8.7-pg18-bookworm
+        env:
+          POSTGRES_USER: rag
+          POSTGRES_PASSWORD: rag-test-secret
+          POSTGRES_DB: rag
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rag -d rag"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGDATABASE: rag
+      PGUSER: rag
+      PGPASSWORD: rag-test-secret
+      RAG_TEST_DB: "1"
+      RAG_EMBEDDINGS_ENABLED: "0"
+      RAG_DB_PASSWORD: rag-test-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install isolated RAG dependencies
+        run: python -m pip install -r rag/requirements.txt reportlab==4.4.0
+      - name: Validate standalone Compose configuration
+        run: docker compose -f rag/compose.yaml config -q
+      - name: Compile RAG source
+        run: python -m compileall -q rag/ragcore rag/tests
+      - name: Verify fidelity and PostgreSQL integration
+        run: python -m unittest discover -s rag/tests -v
