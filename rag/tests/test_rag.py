@@ -37,7 +37,7 @@ class ParserTests(unittest.TestCase):
             (root / "external.txt").write_text("secret", encoding="utf-8")
             (root / "outside-link.txt").symlink_to(root / "external.txt")
             found = list(walk_documents(root))
-            self.assertEqual([path for path, _ in found], ["deep/nested/a.txt", "external.txt"])
+            self.assertEqual(sorted(path for path, _ in found), ["deep/nested/a.txt", "external.txt"])
 
     def test_word_preserves_tables_paragraphs_headers(self):
         from docx import Document
