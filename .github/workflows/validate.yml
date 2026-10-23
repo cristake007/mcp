@@ -48,7 +48,7 @@ jobs:
           sudo ln -s /etc/nginx/sites-available/mcp-example /etc/nginx/sites-enabled/mcp-example
           sudo nginx -t
       - name: Validate operations scripts
-        run: bash -n ops/backup.sh ops/offsite-restic.sh ops/install-maintenance.sh ops/prepare-nginx.sh
+        run: bash -n ops/backup.sh ops/offsite-restic.sh ops/install-maintenance.sh ops/prepare-nginx.sh ops/verify-restore.sh
       - name: Compile Python sources
         run: python -m compileall -q app tests
       - name: Import application and check provider
