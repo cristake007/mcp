@@ -194,6 +194,37 @@ delete all database contents. Database volumes persist across normal rebuilds.
 The app binds port 4444 to host loopback; PostgreSQL stays on the internal
 Docker network.
 
+## OAuth / HTTP request hardening
+
+The private OAuth provider now requires the canonical resource indicator
+(https://YOUR-MCP-HOST/mcp) on both /authorize and /token
+(including refresh grants). The bound audience is persisted on new access
+and refresh tokens; a token with a different stored audience is rejected.
+Old opaque tokens issued for this single resource continue only through
+their remaining expiry.
+
+FastMCP 4.1's native Host/Origin guard is enabled for all HTTP routes.
+The public MCP hostname is allowed, along with container-local loopback for
+Docker health checks. Browser requests with an unrelated Origin or Host are
+rejected before authorization. Nginx must continue passing the original
+Host header (proxy_set_header Host $host).
+
+After updating, verify the public health check and a NEW ChatGPT OAuth
+connection (the latter tests authorization and token exchange, not only DB):
+
+```bash
+curl -fsS https://YOUR-MCP-HOST/healthz
+# Local tests, from the VPS:
+curl -i -H 'Host: evil.example' http://127.0.0.1:4444/healthz
+curl -i -H 'Origin: https://evil.example' -H 'Host: YOUR-MCP-HOST' http://127.0.0.1:4444/healthz
+```
+
+Expected: 421 for Host mismatch and 403 for Origin mismatch.
+Existing ChatGPT refresh sessions should continue if the client sends
+the standard resource parameter; clients omitting it need to reconnect
+with a specification-compliant OAuth flow. CI covers PKCE, resource matching,
+audience rejection, refresh and HTTP guards.
+
 ## Security / readiness
 
 This is **not yet an audited production deployment**, despite the added backup
