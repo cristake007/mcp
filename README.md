@@ -225,6 +225,13 @@ the standard resource parameter; clients omitting it need to reconnect
 with a specification-compliant OAuth flow. CI covers PKCE, resource matching,
 audience rejection, refresh and HTTP guards.
 
+## Optional standalone RAG
+
+An **independent, opt-in** document indexing project lives in [rag/](rag/README.md).
+Its Docker Compose project, PostgreSQL database, dependencies and files are
+separate. Root `docker compose up -d` starts **only MCP**, never RAG.
+There is no current MCP↔RAG integration.
+
 ## Security / readiness
 
 This is **not yet an audited production deployment**, despite the added backup
