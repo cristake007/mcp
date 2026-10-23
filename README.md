@@ -154,35 +154,45 @@ The ChatGPT account must independently support custom MCP connectors/apps.
 
 ## 5. Operations
 
-### Scheduled database maintenance
-
-Expired authorization tickets, codes, bearer token records and login attempt
-counters must be deleted periodically:
+For an existing Certbot HTTPS site, install the rate-limit and safe access-log
+snippets **without overwriting its vhost**:
 
 ```bash
-docker compose exec mcp python -m app.manage cleanup
+sudo bash ops/prepare-nginx.sh
 ```
 
-Schedule this daily using root cron or a systemd timer; see
-[`ops/README.md`](ops/README.md). This does not delete legitimate unexpired
-sessions. The login credentials database still requires separate encrypted
-off-VPS backups and **restore tests**.
+Then add the single HTTPS server-block include described in
+[`webserver/README.md`](webserver/README.md), run `sudo nginx -t`, and
+reload Nginx. Snippet preparation alone is not activation.
 
+After confirming an initial manual database backup, install persistent daily
+systemd timers for database backups and expired OAuth cleanup:
 
 ```bash
-docker compose logs -f --tail=100 mcp
-sudo bash ops/backup.sh
-docker compose down
+sudo bash ops/install-maintenance.sh
+sudo systemctl start mcp-db-backup.service
+sudo systemctl list-timers 'mcp-*' --all
 ```
 
-**Do not** run `docker compose down -v` unless you deliberately want to delete
-all database contents. The new backup script is documented in
-[`ops/README.md`](ops/README.md): schedule it daily, store an encrypted offsite
-copy, and test restoration on an isolated host. Database volumes persist
-across normal rebuilds.
+Check the newest backup by fully restoring it in a disposable PostgreSQL 18
+container without touching the live database:
 
-The application only publishes port `4444` on host loopback; the database
-is private to Docker. TLS terminates at host Nginx.
+```bash
+sudo bash ops/verify-restore.sh
+```
+
+Read the complete instructions and optional encrypted offsite backups in
+[`ops/README.md`](ops/README.md). Routine logs can be inspected with:
+
+```bash
+docker compose logs --tail=100 mcp
+sudo journalctl -u mcp-db-backup.service -u mcp-oauth-cleanup.service -n 50 --no-pager
+```
+
+**Do not** run `docker compose down -v` unless you deliberately want to
+delete all database contents. Database volumes persist across normal rebuilds.
+The app binds port 4444 to host loopback; PostgreSQL stays on the internal
+Docker network.
 
 ## Security / readiness
 
