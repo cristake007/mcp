@@ -1,0 +1,28 @@
+# Include within the existing HTTPS MCP "server {}" block:
+# include /etc/nginx/snippets/mcp-hardening.inc;
+# Requires conf.d/mcp-security.conf and snippets/mcp-proxy.inc (see README).
+#
+# This does NOT replace the existing 'location /' proxy or Certbot TLS config.
+# The exact-match locations take precedence over the existing catch-all.
+access_log /var/log/nginx/mcp.access.log mcp_no_query;
+limit_req_status 429;
+
+location = /login {
+    limit_req zone=mcp_login_ip burst=40 nodelay;
+    client_max_body_size 16k;
+    include /etc/nginx/snippets/mcp-proxy.inc;
+}
+location = /register {
+    limit_req zone=mcp_register_ip burst=10 nodelay;
+    client_max_body_size 16k;
+    include /etc/nginx/snippets/mcp-proxy.inc;
+}
+location = /authorize {
+    limit_req zone=mcp_token_ip burst=40 nodelay;
+    include /etc/nginx/snippets/mcp-proxy.inc;
+}
+location = /token {
+    limit_req zone=mcp_token_ip burst=40 nodelay;
+    client_max_body_size 16k;
+    include /etc/nginx/snippets/mcp-proxy.inc;
+}
