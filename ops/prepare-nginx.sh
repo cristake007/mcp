@@ -55,7 +55,8 @@ if ! nginx -t; then
 fi
 
 echo
-echo "Nginx snippets installed and syntax verified. NO NGINX RULES HAVE BEEN ACTIVATED YET."
+echo "Nginx snippets installed and syntax verified."
+echo "This script does NOT edit the active HTTPS vhost or reload Nginx."
 echo
 echo "IMPORTANT: DO NOT open or edit /etc/nginx/snippets/mcp-hardening.inc."
 echo "That file is the snippet TO BE INCLUDED. Never include a file inside itself."
