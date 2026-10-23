@@ -170,7 +170,7 @@ endpoints should return successful JSON responses.
 
 ## 7. Create accounts and connect ChatGPT
 
-Create at most two accounts; passwords are prompted interactively:
+Create a local account for each approved colleague; passwords are prompted interactively:
 
 ```bash
 sudo docker compose exec mcp python -m app.manage add-user user1@example.com
@@ -190,7 +190,7 @@ sudo docker compose ps
 sudo docker compose logs -f --tail=100 mcp
 sudo systemctl status nginx
 sudo nginx -t
-sudo docker compose exec -T postgres pg_dump -U mcp -d mcp > mcp-backup.sql
+sudo ./ops/backup.sh  # from the repo root; see ops/README.md
 ```
 
 Run Docker Compose commands from the project root (where `compose.yaml` is).
