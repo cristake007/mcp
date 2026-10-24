@@ -10,7 +10,7 @@ from psycopg.types.json import Jsonb
 
 from .articles import article_by_label, article_for_hit
 from .chunking import make_chunks, verify_coverage
-from .embeddings import MODEL_ID, Embedder, enabled
+from .embeddings import MODEL_ID, Embedder, cached_embedder
 from .parsing import SUPPORTED, parse_file
 
 
@@ -179,7 +179,7 @@ def search(conn, query: str, *, limit: int = 8, use_vectors: bool = True) -> lis
             )
             rankings.append((0.8, [row["id"] for row in cur.fetchall()]))
         if use_vectors:
-            vector = Embedder().embed([query], is_query=True)[0]
+            vector = cached_embedder().embed([query], is_query=True)[0]
             cur.execute(
                 """SELECT c.id FROM rag_chunks c
                 JOIN rag_documents d ON d.id=c.document_id
