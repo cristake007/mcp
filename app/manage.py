@@ -45,6 +45,20 @@ async def disable_user(email: str) -> None:
             await cur.execute("DELETE FROM oauth_codes WHERE user_id=%s", (row["id"],))
 
 
+async def enable_user(email: str) -> None:
+    """Reactivate an existing account without changing its password."""
+    async with connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """UPDATE users
+                SET active=TRUE, failures=0, locked_until=NULL
+                WHERE email=%s RETURNING id""",
+                (email.strip().lower(),),
+            )
+            if not await cur.fetchone():
+                raise ValueError("User not found")
+
+
 async def list_users() -> None:
     async with connection() as conn:
         async with conn.cursor() as cur:
@@ -94,6 +108,8 @@ def main() -> None:
     sub.add_parser("init-db")
     add = sub.add_parser("add-user")
     add.add_argument("email")
+    enable = sub.add_parser("enable-user")
+    enable.add_argument("email")
     disable = sub.add_parser("disable-user")
     disable.add_argument("email")
     sub.add_parser("list-users")
@@ -114,6 +130,9 @@ def main() -> None:
                 raise ValueError("Passwords do not match")
             asyncio.run(set_user(args.email, password))
             print("Account created or updated; previous tokens revoked")
+        elif args.command == "enable-user":
+            asyncio.run(enable_user(args.email))
+            print("Account enabled")
         elif args.command == "disable-user":
             asyncio.run(disable_user(args.email))
             print("Account disabled; tokens revoked")
