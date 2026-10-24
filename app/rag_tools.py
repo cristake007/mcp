@@ -205,6 +205,8 @@ def register_rag_tools(server: FastMCP) -> None:
         )
         return [description, Image(data=payload, format="jpeg")]
 
+    if tool_enabled("get_page_image"):
+        server.tool()(get_page_image)
     if tool_enabled("corpus_health"):
         server.tool()(corpus_health)
     if tool_enabled("list_docs"):
