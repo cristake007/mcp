@@ -306,6 +306,11 @@ rag_command() {
             if [[ "$action" == "search" || "$action" == "stats" ]]; then
                 [[ $# -ge 1 ]] || die "Utilizare: rag $action 'termen sau intrebare'"
             fi
+            # Corpus statistics are a newly added CLI command; rebuild the
+            # CLI image if the checkout was updated since the previous build.
+            if [[ "$action" == "stats" ]]; then
+                rag_compose build cli
+            fi
             rag_compose run --rm cli "$action" "$@"
             ;;
         *) die "Comanda rag invalida. Foloseste: ./mcpctl help";;
