@@ -63,6 +63,14 @@ jobs:
           assert "/healthz" in paths
           print("FastMCP imports OK")
           PY
+      - name: Validate opt-in RAG Compose overlay
+        env:
+          RAG_API_TOKEN: ci-bridge-long-secret-0123456789abcdef
+        run: docker compose -f compose.yaml -f compose.rag.yaml config -q
+      - name: Verify RAG tools are optional and preserve literal text
+        run: |
+          MCP_RAG_ENABLED=0 python -m tests.rag_optional
+          MCP_RAG_ENABLED=1 MCP_RAG_URL=http://rag-api:8080 MCP_RAG_API_TOKEN=ci-bridge-long-secret-0123456789abcdef python -m tests.rag_optional
       - name: Smoke-test OAuth, MCP and token lifecycle
         run: |
           python -m app.manage init-db
