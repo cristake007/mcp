@@ -42,18 +42,26 @@ def articles(raw_text: str) -> list[Article]:
     return results
 
 
-def article_for_hit(raw_text: str, start: int, end: int) -> Article | None:
-    """Pick the article with the largest overlap with a retrieved chunk.
+def article_for_hit(raw_text: str, start: int, end: int,
+                    query: str = "") -> Article | None:
+    """Select an article intersecting a result, preferring lexical query hits.
 
-    If the chunk crosses two headings, we deliberately do not guess which
-    article answers the query; the largest overlap is an explainable heuristic.
+    Retrieval chunks may cross article boundaries. Only the intersecting
+    portion of each article is scored; if no query term matches, largest
+    character overlap is a documented fallback, not a semantic guarantee.
     """
-    candidates = [
-        (min(end, item.end) - max(start, item.start), item)
-        for item in articles(raw_text)
-        if item.start < end and item.end > start
-    ]
-    return max(candidates, key=lambda entry: entry[0])[1] if candidates else None
+    candidates = [item for item in articles(raw_text)
+                  if item.start < end and item.end > start]
+    if not candidates:
+        return None
+    terms = {word for word in re.findall(r"[^\\W_]+", query.casefold())
+             if len(word) >= 4}
+    def score(item: Article) -> tuple[int, int]:
+        a = max(start, item.start)
+        b = min(end, item.end)
+        overlapping_text = raw_text[a:b].casefold()
+        return (sum(word in overlapping_text for word in terms), b - a)
+    return max(candidates, key=score)
 
 
 def article_by_label(raw_text: str, label: str) -> Article:
