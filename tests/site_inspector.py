@@ -331,5 +331,59 @@ class SiteInspectorTests(unittest.TestCase):
                 site.inspect_site("get", url=url, fields=["title"])
 
 
+    def test_course_archive_does_not_consume_a_batch_slot(self):
+        sitemap = "https://tuvkarpat.ro/cursuri-sitemap.xml"
+        index_url = "https://tuvkarpat.ro/cursuri/"
+        courses = [f"https://tuvkarpat.ro/cursuri/curs-{i:03d}/" for i in range(195)]
+        urls = [index_url] + courses
+        def read_course(url):
+            self.assertNotEqual(url, index_url)
+            return {"url": url, "format": "acf_json", "title": url, "id": 12,
+                    "acf": {"tematica": "Audit de diacritice"}}
+        with (
+            patch.object(site, "_sitemaps", return_value=[sitemap]),
+            patch.object(site, "_urls", return_value=urls),
+            patch.object(site, "_read_page", side_effect=read_course) as reader,
+        ):
+            first = site.inspect_site("batch_get", sitemap="cursuri-sitemap.xml",
+                                      limit=5, fields=["title", "acf.tematica"])
+            self.assertEqual(first["total_urls"], 196)
+            self.assertEqual(first["auditable_urls"], 195)
+            self.assertEqual(first["skipped_index_urls"], [index_url])
+            self.assertEqual(first["processed"], 5)
+            self.assertEqual(first["next_offset"], 5)
+            self.assertEqual([p["url"] for p in first["pages"]], courses[:5])
+            self.assertEqual(reader.call_count, 5)
+            second = site.inspect_site("batch_get", sitemap="cursuri-sitemap.xml",
+                                       offset=5, limit=5)
+            self.assertEqual([p["url"] for p in second["pages"]], courses[5:10])
+            last = site.inspect_site("batch_get", sitemap="cursuri-sitemap.xml",
+                                     offset=190, limit=5)
+            self.assertEqual([p["url"] for p in last["pages"]], courses[-5:])
+            self.assertEqual(last["processed"], 5)
+            self.assertIsNone(last["next_offset"])
+            self.assertTrue(last["end_of_sitemap"])
+            self.assertEqual(reader.call_count, 15)
+            # The original sitemap listing remains unchanged for normal urls.
+            listed = site.inspect_site("urls", sitemap="cursuri-sitemap.xml", limit=2)
+            self.assertEqual(listed["total"], 196)
+            self.assertEqual(listed["urls"], [index_url, courses[0]])
+
+    def test_only_matching_archive_root_is_excluded(self):
+        sitemap = "https://tuvkarpat.ro/cursuri-sitemap.xml"
+        urls = ["https://tuvkarpat.ro/cursuri",
+                "https://tuvkarpat.ro/cursuri/cursuri/",
+                "https://tuvkarpat.ro/industriale/",
+                "https://tuvkarpat.ro/cursuri/test/"]
+        auditable, skipped = site._index_pages_in_sitemap(sitemap, urls)
+        self.assertEqual(skipped, [urls[0]])
+        self.assertEqual(auditable, urls[1:])
+        auditable, skipped = site._index_pages_in_sitemap(
+            "https://tuvkarpat.ro/industriale-sitemap.xml", urls)
+        self.assertEqual(skipped, [urls[2]])
+        self.assertEqual(auditable, [urls[0], urls[1], urls[3]])
+
+
+
 if __name__ == "__main__":
     unittest.main()
