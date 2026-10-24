@@ -86,14 +86,18 @@ def register_rag_tools(server: FastMCP) -> None:
         )
 
     async def corpus_stats(term: str, second_term: str | None = None,
-                           mode: str = "all", examples_limit: int = 10) -> dict:
+                           mode: str = "all", examples_limit: int = 10,
+                           match_type: str = "linguistic") -> dict:
         """Exact counts over ALL indexed RAG documents, not top search hits.
 
-        Count literal phrase mentions and matching documents/articles. With two
+        Count Romanian word-family mentions by default (match_type=linguistic),
+        including forms such as suspendare/suspendarea. Use match_type=exact
+        for literal-only counts. Stemming is heuristic, not lemmatization.
+        With two
         terms and mode='all' (default), both terms must appear in the same
         document for matching_documents, or within the SAME detected article
         for matching_articles. mode='any' means either term. Counts are
-        case/accent-insensitive, with whole-word boundaries; NOT semantic
+        case/accent-insensitive, using token boundaries; NOT semantic
         equivalence or legal interpretation. 'occurrences_per_term' counts
         each term independently over the entire corpus. Example lists are
         capped but totals are exhaustive. Use document_id and char_start/end
@@ -110,10 +114,13 @@ def register_rag_tools(server: FastMCP) -> None:
             raise ValueError("mode must be 'all' or 'any'")
         if type(examples_limit) is not int or not 0 <= examples_limit <= 20:
             raise ValueError("examples_limit must be between 0 and 20")
+        if match_type not in ("linguistic", "exact"):
+            raise ValueError("match_type must be linguistic or exact")
         return await asyncio.to_thread(
             _request, "/stats",
             {"term": term, "second_term": second_term,
-             "mode": mode, "examples_limit": examples_limit},
+             "mode": mode, "examples_limit": examples_limit,
+             "match_type": match_type},
         )
 
     if tool_enabled("search_docs"):
