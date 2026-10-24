@@ -8,7 +8,7 @@ from app.rag_tools import _request
 
 
 async def main():
-    tools = set((await mcp.get_tools()).keys())
+    tools = {tool.name for tool in await mcp.list_tools()}
     assert {"ping", "whoami"} <= tools, tools
     enabled = os.getenv("MCP_RAG_ENABLED") == "1"
     if enabled:
@@ -22,7 +22,7 @@ async def main():
 
     isolated = FastMCP("optional-tools-test")
     register_rag_tools(isolated)
-    custom = await isolated.get_tools()
+    custom = {tool.name: tool for tool in await isolated.list_tools()}
     assert set(custom) == {"search_docs", "get_text"}
     expected = "Art. 15\n  Verificare anuală.\n"
     with patch("app.rag_tools._request", return_value={
