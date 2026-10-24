@@ -156,6 +156,26 @@ def _urls(sitemap_url: str) -> list[str]:
     return list(dict.fromkeys(urls))
 
 
+def _index_pages_in_sitemap(sitemap_url: str, urls: list[str]) -> tuple[list[str], list[str]]:
+    """Exclude an archive landing page from individual-entry audit batches.
+
+    For cursuri-sitemap.xml, /cursuri/ is the archive, not an ACF course.
+    This does not affect the normal urls or get actions.
+    """
+    filename = urlsplit(sitemap_url).path.rsplit("/", 1)[-1]
+    match = re.fullmatch(r"([a-z0-9_-]+)-sitemap(?:\d+)?\.xml", filename)
+    if match is None:
+        return list(urls), []
+    archive_path = "/" + match.group(1)
+    entries, skipped = [], []
+    for item in urls:
+        parsed = urlsplit(item)
+        if not parsed.query and parsed.path.rstrip("/") == archive_path:
+            skipped.append(item)
+        else:
+            entries.append(item)
+    return entries, skipped
+
 def _clean_html(raw: str) -> str:
     soup = BeautifulSoup(raw, "html.parser")
     for element in soup.select(REMOVE_HTML):
