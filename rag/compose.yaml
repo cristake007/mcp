@@ -17,6 +17,37 @@ services:
       timeout: 5s
       retries: 10
 
+  indexer:
+    # Standalone periodic ingestion; never starts as part of the root MCP stack.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: ["python", "-m", "ragcore.indexer"]
+    command: []
+    restart: unless-stopped
+    environment:
+      PGHOST: database
+      PGPORT: "5432"
+      PGDATABASE: rag
+      PGUSER: rag
+      PGPASSWORD: ${RAG_DB_PASSWORD:?Create rag/.env with a strong RAG_DB_PASSWORD}
+      RAG_DOCUMENTS: /documents
+      RAG_EMBEDDINGS_ENABLED: ${RAG_EMBEDDINGS_ENABLED:-1}
+      RAG_SCAN_INTERVAL_SECONDS: ${RAG_SCAN_INTERVAL_SECONDS:-60}
+      RAG_SETTLE_SECONDS: ${RAG_SETTLE_SECONDS:-20}
+      RAG_AUTO_PRUNE: ${RAG_AUTO_PRUNE:-1}
+      FASTEMBED_CACHE_PATH: /model-cache
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      OMP_NUM_THREADS: "2"
+    volumes:
+      - ./documents:/documents:ro
+      - model_cache:/model-cache
+    depends_on:
+      database:
+        condition: service_healthy
+    networks: [rag_private]
+    stop_grace_period: 90s
+
   cli:
     profiles: [tools]
     build:
