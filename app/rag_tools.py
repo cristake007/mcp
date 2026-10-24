@@ -29,7 +29,7 @@ def _request(path: str, payload: dict) -> dict:
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=25) as response:
+        with urllib.request.urlopen(request, timeout=60 if path == "/stats" else 25) as response:
             if response.status != 200:
                 raise RuntimeError("RAG returned an unexpected HTTP status")
             body = response.read(1_500_001)
@@ -85,7 +85,40 @@ def register_rag_tools(server: FastMCP) -> None:
             {"document_id": document_id, "start": start, "end": end, "article": article},
         )
 
+    async def corpus_stats(term: str, second_term: str | None = None,
+                           mode: str = "all", examples_limit: int = 10) -> dict:
+        """Exact counts over ALL indexed RAG documents, not top search hits.
+
+        Count literal phrase mentions and matching documents/articles. With two
+        terms and mode='all' (default), both terms must appear in the same
+        document for matching_documents, or within the SAME detected article
+        for matching_articles. mode='any' means either term. Counts are
+        case/accent-insensitive, with whole-word boundaries; NOT semantic
+        equivalence or legal interpretation. 'occurrences_per_term' counts
+        each term independently over the entire corpus. Example lists are
+        capped but totals are exhaustive. Use document_id and char_start/end
+        to retrieve the cited article with get_text. Don't guess exact
+        statistics from search_docs results.
+        """
+        if not isinstance(term, str) or not 1 <= len(term.strip()) <= 120:
+            raise ValueError("term must contain 1-120 characters")
+        if second_term is not None and (
+            not isinstance(second_term, str) or not 1 <= len(second_term.strip()) <= 120
+        ):
+            raise ValueError("second_term must contain 1-120 characters or be null")
+        if mode not in ("all", "any"):
+            raise ValueError("mode must be 'all' or 'any'")
+        if type(examples_limit) is not int or not 0 <= examples_limit <= 20:
+            raise ValueError("examples_limit must be between 0 and 20")
+        return await asyncio.to_thread(
+            _request, "/stats",
+            {"term": term, "second_term": second_term,
+             "mode": mode, "examples_limit": examples_limit},
+        )
+
     if tool_enabled("search_docs"):
         server.tool()(search_docs)
     if tool_enabled("get_text"):
         server.tool()(get_text)
+    if tool_enabled("corpus_stats"):
+        server.tool()(corpus_stats)
