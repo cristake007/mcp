@@ -153,6 +153,63 @@ class ParserTests(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get("RAG_TEST_DB") == "1", "Only with isolated CI PostgreSQL")
+class ApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_optional_read_only_http_api(self):
+        import httpx
+        from ragcore import store
+        from ragcore.api import app
+
+        with tempfile.TemporaryDirectory() as scratch:
+            file = Path(scratch) / "legal.txt"
+            file.write_text(
+                "Art. 33 (1) Verificari tehnice.\n(2) Se face anual.\n"
+                "Art. 34 (1) ISCIR verifica dosarul.\n(2) Dosarul se semneaza.",
+                encoding="utf-8",
+            )
+            with store.connect() as conn:
+                store.init_schema(conn)
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM rag_documents")
+                self.assertEqual(store.scan(conn, Path(scratch), use_vectors=False)["updated"], 1)
+            prior = os.environ.get("RAG_API_TOKEN")
+            os.environ["RAG_API_TOKEN"] = "unit-test-example-unpredictable-token-0123456789abcdef"
+            try:
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://rag-api"
+                ) as client:
+                    denied = await client.post("/search", json={"query": "verificari"})
+                    self.assertEqual(denied.status_code, 401)
+                    headers = {"Authorization": "Bearer " + os.environ["RAG_API_TOKEN"]}
+                    results = await client.post(
+                        "/search", json={"query": "verificari"}, headers=headers
+                    )
+                    self.assertEqual(results.status_code, 200, results.text)
+                    item = results.json()["results"][0]
+                    self.assertEqual(item["path"], "legal.txt")
+                    self.assertEqual(item["article"]["label"], "33")
+                    self.assertIn("(2) Se face anual", item["article"]["text"])
+                    text = await client.post(
+                        "/text",
+                        json={"document_id": item["document_id"], "article": "Art. 33"},
+                        headers=headers,
+                    )
+                    self.assertEqual(text.status_code, 200, text.text)
+                    self.assertEqual(text.json()["text"], item["article"]["text"])
+                    self.assertTrue(text.json()["exact"])
+                    bad_range = await client.post(
+                        "/text",
+                        json={"document_id": item["document_id"], "start": -1},
+                        headers=headers,
+                    )
+                    self.assertEqual(bad_range.status_code, 400)
+            finally:
+                if prior is None:
+                    os.environ.pop("RAG_API_TOKEN", None)
+                else:
+                    os.environ["RAG_API_TOKEN"] = prior
+
+
+@unittest.skipUnless(os.environ.get("RAG_TEST_DB") == "1", "Only with isolated CI PostgreSQL")
 class StoreTests(unittest.TestCase):
     def test_incremental_search_prune_and_exact_retrieval(self):
         from ragcore import store
