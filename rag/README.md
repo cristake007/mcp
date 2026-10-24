@@ -293,44 +293,39 @@ The first OCR pass over a large illustrated manual can use CPU for several
 minutes; the indexer remains single-process and non-destructive. The API
 never runs OCR per user question.
 
-### Interactive original FIGURE viewer in ChatGPT (MCP Apps)
+### Minimal original figure image in ChatGPT (MCP Apps)
 
-The MCP App shows the **individual OCR-indexed figure** from the original
-local PDF as a cropped JPEG inside the ChatGPT conversation. It no longer
-opens an entire navigable PDF automatically.
+The optional MCP App is **only one original source JPEG** (no PDF viewer,
+navigation, zoom, gallery, heading, caption, or secondary text in its UI).
 
-- `show_rag_sources(query="Ce conectori are MANTIS?")` prioritizes indexed
-  `ocr_figure` results with `figure_id` and displays their source images.
-  Distinct figures on one page are separate selectable images.
-- `show_rag_sources(document_id=N,page=P,figure_id=F)` shows the *exact*
-  source figure grounded in a `search_docs` hit.
-- `show_rag_sources(document_id=N,page=P)`, without a figure ID, obtains
-  the actual figures on that page from the private `/figures` API rather
-  than opening a complete PDF. The user selects the relevant figure if there
-  are several (e.g., MANTIS Figures 3 and 4 on page 12).
-- The page viewer's optional **Pagina completă** button is the only way to
-  switch from the figure image to an entire source page; it can be toggled
-  back to the individual figure. Navigation between PDF pages is available
-  only in this explicitly opened full-page mode.
-- Images come exclusively from the authenticated private `/page-image`
-  endpoint, which checks the document's index SHA-256 and figures'
-  `document_id`, `page` and `figure_id` relationships. Indexed
-  coordinate rectangles are used for cropping; caller-provided arbitrary
-  crop coordinates are **not** accepted.
-- The sandboxed viewer calls `get_rag_page_data` (app-only) for each image.
-  No web search, hosted image service, PDF parsing by ChatGPT, external
-  iframe, public URL or new database/storage component is required.
+- `show_rag_sources(query="Ce conectori are aparatul MANTIS?")` searches the
+  private RAG, matches the question against OCR and figure captions and
+  selects **at most one** evidenced indexed figure. Poorly related OCR hits
+  (e.g. unrelated file-manager screenshots) are not displayed.
+- `show_rag_sources(document_id=N,page=P,figure_id=F)` displays a single
+  explicitly grounded figure from `search_docs`.
+- When only a document and page are supplied, the viewer displays the
+  figure only when that page contains **exactly one** indexed figure.
+  If there are multiple figures (e.g. MANTIS front panel and connectors
+  on the same page), it requires the actual `figure_id`; it never
+  guesses one or returns the whole PDF.
+- The app-only `get_rag_page_data` **requires** `figure_id` and validates
+  the resulting `image_kind=cropped_original_pdf_figure`.
+  Images come from the original local PDF, whose bytes are verified by
+  SHA-256 and whose stored index coordinates define the crop.
+- The widget is delivered from the versioned resource
+  `ui://rag/figure-image/v3.html`, so clients can fetch a new UI after
+  refreshing tools. The old v1/v2 UI should not appear for new calls.
 
-The MCP resource `ui://rag/document-viewer/v1.html` is associated with
-the tool through `_meta.ui.resourceUri`. `get_page_image` continues to
-work for other MCP clients and now also accepts optional `figure_id`.
-Omitting this ID retains the original full-page behavior.
+The ordinary `get_page_image` tool remains backward compatible and can
+return full pages for clients that explicitly call it without a figure ID,
+but the MCP App **does not** use that mode. RAG data and OCR metadata
+do not require reindexing for the app update.
 
-The host must still select `show_rag_sources` for the app to open. A model
-may choose other tools, and crop relevance still depends on OCR retrieval.
-This UI cannot force ChatGPT not to browse the web or guarantee rendering in
-every client. The source documents and OCR index require **no reindexing**
-for this display-only update.
+The assistant/host may still produce its own prose in the surrounding
+conversation, and ChatGPT controls which tools are called. The MCP App
+cannot force the client to use the connector or suppress messages outside
+the widget.
 
 ### Images from indexed PDF manuals: `get_page_image`
 
