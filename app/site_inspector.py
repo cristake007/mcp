@@ -3,11 +3,13 @@
 Uses the same browser headers and curl transport that were validated manually.
 No RAG, embeddings, database, arbitrary shell expressions or external domains.
 """
+import hashlib
 import json
 import re
 import subprocess
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
+from bs4.element import Comment, NavigableString, Tag
 from urllib.parse import quote, urlsplit
 
 from bs4 import BeautifulSoup
@@ -188,6 +190,133 @@ def _as_search_text(data: dict) -> str:
     for nav in soup.select("nav, .elementor-nav-menu"):
         nav.decompose()
     return re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
+
+
+
+# Preserve text from all ACF source fields and unknown Elementor elements.
+# Structural separators retain context from headings, lists and table cells.
+BLOCK_TAGS = {
+    "article", "aside", "blockquote", "dd", "details", "div", "dl", "dt",
+    "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
+    "h5", "h6", "header", "hr", "li", "main", "ol", "p", "pre",
+    "section", "summary", "table", "tbody", "tfoot", "thead", "tr", "ul",
+}
+BATCH_MAX_PAGES = 5
+BATCH_CHARS_PER_PAGE = 12000
+
+
+def _visible_text(html_or_text: str) -> str:
+    """Keep all captured text nodes, including unknown widgets and table cells.
+
+    This processes the returned HTML, not JavaScript-rendered DOM. It does not
+    attempt Romanian-language correction, filtering or candidate detection.
+    """
+    soup = BeautifulSoup(html_or_text, "html.parser")
+    for element in soup.select("script, style, meta, iframe, noscript"):
+        element.decompose()
+    pieces = []
+
+    def visit(node):
+        if isinstance(node, Comment):
+            return
+        if isinstance(node, NavigableString):
+            pieces.append(str(node))
+            return
+        if not isinstance(node, Tag):
+            return
+        if node.name in BLOCK_TAGS or node.name == "br":
+            pieces.append("\n")
+        if node.name == "img" and node.get("alt"):
+            pieces.append(" [imagine alt: " + node["alt"] + "] ")
+        for child in node.children:
+            visit(child)
+        if node.name in {"td", "th"}:
+            pieces.append("\t")
+        elif node.name in BLOCK_TAGS:
+            pieces.append("\n")
+
+    visit(soup)
+    text = "".join(pieces)
+    text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _audit_text(data: dict) -> tuple[str, list[str]]:
+    """Serialize all visible HTML text or all leaf ACF values with field paths."""
+    warnings = []
+    if data["format"] != "acf_json":
+        text = _visible_text(data.get("html", ""))
+        if not text:
+            warnings.append("Niciun text găsit în HTML; verifică pagina publică.")
+        return text, warnings
+
+    lines = []
+    if data.get("title"):
+        lines.append("[title]\n" + _visible_text(data["title"]))
+
+    def traverse(value, path):
+        if isinstance(value, dict):
+            for name, nested in value.items():
+                traverse(nested, path + "." + str(name))
+        elif isinstance(value, list):
+            for i, nested in enumerate(value):
+                traverse(nested, path + "[" + str(i) + "]")
+        elif isinstance(value, str):
+            # Preserve textual values of all ACF keys, not a predefined field subset.
+            text = _visible_text(value)
+            if text:
+                lines.append("[" + path + "]\n" + text)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            lines.append("[" + path + "]\n" + str(value))
+
+    if data.get("acf") is None:
+        warnings.append("ACF absent în REST API; conținutul poate fi incomplet.")
+    else:
+        traverse(data["acf"], "acf")
+        if not data["acf"]:
+            warnings.append("ACF este gol în REST API.")
+    return "\n\n".join(lines), warnings
+
+
+def _page_chunks(content: str, part: int, size: int, expected_hash: str = "") -> dict:
+    """Deterministic, reconstructible slices. No characters disappear."""
+    checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if expected_hash and expected_hash != checksum:
+        raise ValueError("Conținutul paginii s-a schimbat; reia de la part=0.")
+    total_parts = max(1, (len(content) + size - 1) // size)
+    if not 0 <= part < total_parts:
+        raise ValueError("part este în afara intervalului 0..%d" % (total_parts - 1))
+    piece = content[part * size:(part + 1) * size]
+    return {
+        "content": piece,
+        "total_chars": len(content),
+        "sha256": checksum,
+        "part": part,
+        "total_parts": total_parts,
+        "next_part": part + 1 if part + 1 < total_parts else None,
+        "content_complete": total_parts == 1,
+        "part_complete": True,
+    }
+
+
+def _batch_page(url: str, chars_per_page: int) -> dict:
+    data = _read_page(url)
+    text, warnings = _audit_text(data)
+    chunks = _page_chunks(text, 0, chars_per_page)
+    return {
+        "url": url,
+        "format": data["format"],
+        "id": data.get("id"),
+        "warnings": warnings,
+        **chunks,
+        "retrieve_remaining": (
+            {"action": "get", "url": url, "view": "text",
+             "part": 1, "max_chars": chars_per_page,
+             "expected_hash": chunks["sha256"]}
+            if chunks["next_part"] is not None else None
+        ),
+    }
+
 
 
 def _search_one(entry: tuple[str, str], query: str) -> dict | None:
