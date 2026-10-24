@@ -34,12 +34,12 @@ async def main() -> None:
     ]
     selected = prepare_sources(sample, 4)
     assert len(selected["sources"]) == 3
-    assert len(selected["pages"]) == 2
+    assert len(selected["pages"]) == 1
     assert selected["pages"][0]["caption"] == "Figure 4 MANTIS connectors"
     assert selected["pages"][0]["figure_id"] == 12
     assert selected["pages"][0]["source_type"] == "ocr_figure"
-    # An unrelated text hit cannot replace the figure preview.
-    assert selected["pages"][1]["figure_id"] is None
+    # Unrelated text hits cannot replace the figure preview.
+    assert all(p["figure_id"] is not None for p in selected["pages"])
 
     jpeg = bytes.fromhex("ffd8ffd9")
     encoded = base64.b64encode(jpeg).decode()
