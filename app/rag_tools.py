@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 
 from fastmcp import FastMCP
+from app.tool_policy import tool_enabled
 
 
 def _request(path: str, payload: dict) -> dict:
@@ -55,7 +56,6 @@ def _request(path: str, payload: dict) -> dict:
 def register_rag_tools(server: FastMCP) -> None:
     """Called at startup only when MCP_RAG_ENABLED=1."""
 
-    @server.tool()
     async def search_docs(query: str, limit: int = 6) -> dict:
         """Search the optional local document RAG (Romanian FTS + semantic RRF).
 
@@ -70,7 +70,6 @@ def register_rag_tools(server: FastMCP) -> None:
             raise ValueError("Invalid query or limit")
         return await asyncio.to_thread(_request, "/search", {"query": query, "limit": limit})
 
-    @server.tool()
     async def get_text(document_id: int, start: int | None = None,
                        end: int | None = None, article: str | None = None) -> dict:
         """Return literal extracted document text without any rewriting.
@@ -85,3 +84,8 @@ def register_rag_tools(server: FastMCP) -> None:
             _request, "/text",
             {"document_id": document_id, "start": start, "end": end, "article": article},
         )
+
+    if tool_enabled("search_docs"):
+        server.tool()(search_docs)
+    if tool_enabled("get_text"):
+        server.tool()(get_text)
