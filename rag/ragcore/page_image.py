@@ -75,8 +75,8 @@ def get_page_image(conn, folder: Path, document_id: int, page: int) -> dict:
         source = pdf.pages[page - 1]
         # Respect a <= 1050 x 1500 pixel bounding box and a modest 110 dpi.
         # Prevent huge memory use on unusual PDF page dimensions.
-        dpi = min(110.0, 72.0 * 1050 / source.width,
-                  72.0 * 1500 / source.height)
+        dpi = min(110.0, 72.0 * 1050 / float(source.width),
+                  72.0 * 1500 / float(source.height))
         if dpi <= 0 or dpi < 4:
             raise ValueError("PDF page dimensions cannot be rendered safely")
         rendered = source.to_image(resolution=dpi, antialias=True).original.convert("RGB")
