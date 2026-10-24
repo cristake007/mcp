@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ragcore.stats import normalize, phrase_pattern, validate
+from ragcore.stemming import count_phrases, stem_sequence
 
 
 class LiteralStatsTests(unittest.TestCase):
@@ -17,6 +18,12 @@ class LiteralStatsTests(unittest.TestCase):
         self.assertEqual(len(matches), 2)
         self.assertEqual(len(list(phrase_pattern("iso 9001").finditer(raw))), 1)
         self.assertEqual(len(list(phrase_pattern("autorizatiei").finditer(raw))), 1)
+
+    def test_linguistic_romanian_forms_do_not_match_unrelated_words(self):
+        phrase = stem_sequence("suspendare")
+        self.assertEqual(phrase, stem_sequence("suspendarea"))
+        sample = "SUSPENDAREA autorizației; suspendare; nesuspendare"
+        self.assertEqual(count_phrases(sample, [phrase]), [2])
 
     def test_invalid_parameters(self):
         for invalid in ("", " ", "x" * 121, 12, None):
@@ -30,10 +37,38 @@ class LiteralStatsTests(unittest.TestCase):
             validate("ISO", None, "all", 21)
         with self.assertRaises(ValueError):
             validate("ISO", None, "all", True)
+        with self.assertRaises(ValueError):
+            validate("ISO", None, "all", 10, "unknown")
 
 
 @unittest.skipUnless(os.environ.get("RAG_TEST_DB") == "1", "Requires isolated pgvector PostgreSQL")
 class CorpusStatsDatabaseTests(unittest.TestCase):
+    def test_linguistic_vs_exact_statistic(self):
+        from ragcore import store
+        from ragcore.stats import corpus_stats
+
+        with tempfile.TemporaryDirectory() as scratch:
+            folder = Path(scratch)
+            (folder / "a.txt").write_text(
+                "Art. 1 (1) Autorizarea este urmată de suspendarea dreptului.\\n",
+                encoding="utf-8",
+            )
+            with store.connect() as conn:
+                store.init_schema(conn)
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM rag_documents")
+                self.assertEqual(store.scan(conn, folder, use_vectors=False)["updated"], 1)
+                linguistic = corpus_stats(conn, "autorizare", "suspendare")
+                literal = corpus_stats(
+                    conn, "autorizare", "suspendare", match_type="exact"
+                )
+                self.assertEqual(linguistic["matching_documents"], 1)
+                self.assertEqual(linguistic["matching_articles"], 1)
+                self.assertEqual(linguistic["occurrences_per_term"], [1, 1])
+                self.assertEqual(literal["matching_documents"], 0)
+                self.assertEqual(literal["matching_articles"], 0)
+                self.assertEqual(literal["occurrences_per_term"], [0, 0])
+
     def test_entire_corpus_and_same_article_vs_same_document(self):
         from ragcore import store
         from ragcore.stats import corpus_stats
