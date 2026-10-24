@@ -1,0 +1,354 @@
+#!/usr/bin/env bash
+# Administrare MCP si RAG dintr-un singur punct. Fara UI sau servicii suplimentare.
+set -Eeuo pipefail
+umask 077
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+RAG="$ROOT/rag"
+MAIN_ENV="$ROOT/.env"
+RAG_ENV="$RAG/.env"
+RAG_FLAG="$ROOT/.mcp-rag-enabled"
+TOOLS=(ping whoami search_docs get_text)
+
+die() { printf 'Eroare: %s\n' "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*"; }
+
+help_screen() {
+cat <<'HELP'
+MCP Control — comenzi administrative (din orice director)
+
+  ./mcpctl help                      Ajutor
+  ./mcpctl status                    Starea serviciilor si a tool-urilor
+
+  ./mcpctl user add EMAIL            Adauga user / reseteaza parola (interactiv)
+  ./mcpctl user enable EMAIL         Reactiveaza contul
+  ./mcpctl user disable EMAIL        Dezactiveaza contul + revoca tokenurile
+  ./mcpctl user list                 Lista utilizatorilor
+  ./mcpctl user clients              Clienti OAuth inregistrati
+
+  ./mcpctl tools list                Starea instrumentelor
+  ./mcpctl tools enable NUME         Activeaza un instrument
+  ./mcpctl tools disable NUME        Dezactiveaza un instrument
+
+  ./mcpctl rag enable                Activeaza integrarea MCP ↔ RAG
+  ./mcpctl rag disable               Dezactiveaza integrarea, PASTREAZA RAG
+  ./mcpctl rag status                Starea RAG
+  ./mcpctl rag start                 Porneste doar baza RAG
+  ./mcpctl rag stop                  Opreste doar RAG (daca nu este conectat)
+  ./mcpctl rag scan [optiuni]        Indexare documente recursiva
+  ./mcpctl rag verify                Verifica exactitatea fragmentelor
+  ./mcpctl rag search "intrebare"    Cauta in documentele indexate
+
+  ./mcpctl mcp start                 Porneste MCP (+ baza sa)
+  ./mcpctl mcp stop                  Opreste doar aplicatia MCP
+  ./mcpctl mcp apply                 Aplica/recreeaza MCP cu setarile curente
+  ./mcpctl mcp logs                  Urmareste logurile MCP
+
+Tool-uri: ping, whoami, search_docs, get_text
+Exemple:
+  ./mcpctl user add coleg@example.ro
+  ./mcpctl tools disable whoami
+  ./mcpctl tools enable whoami
+  ./mcpctl rag scan --lexical-only
+  ./mcpctl rag enable
+  ./mcpctl rag disable
+
+Nota: RAG ramane in propriul Docker Compose si propria baza de date.
+Dezactivarea integrarii nu sterge documente si nu opreste baza RAG.
+HELP
+}
+
+need_docker() {
+    command -v docker >/dev/null 2>&1 || die "Docker nu este instalat."
+    docker compose version >/dev/null 2>&1 || die "Este necesar Docker Compose v2."
+}
+
+need_main_env() { [[ -f "$MAIN_ENV" ]] || die "Lipseste $MAIN_ENV"; }
+need_rag_env() { [[ -f "$RAG_ENV" ]] || die "Lipseste $RAG_ENV; configureaza RAG inainte."; }
+
+# Nu executam (. / source) fisiere .env, care contin secrete.
+env_get() {
+    local file="$1" key="$2" line value=""
+    [[ -f "$file" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == "$key="* ]]; then
+            value="${line#*=}"
+        fi
+    done < "$file"
+    printf '%s' "$value"
+}
+
+# Rescriere atomica, fara eval, fara a afisa sau modifica alte secrete.
+env_set() {
+    local file="$1" key="$2" value="$3" line tmp found=0
+    [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || die "Cheie .env invalida"
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "Valoare .env invalida"
+    [[ -f "$file" ]] || die "Lipseste $file"
+    tmp="$(mktemp "${file}.tmp.XXXXXX")"
+    chmod 600 "$tmp"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == "$key="* ]]; then
+            if (( ! found )); then
+                printf '%s=%s\n' "$key" "$value" >> "$tmp"
+                found=1
+            fi
+        else
+            printf '%s\n' "$line" >> "$tmp"
+        fi
+    done < "$file"
+    if (( ! found )); then printf '%s=%s\n' "$key" "$value" >> "$tmp"; fi
+    mv -f -- "$tmp" "$file"
+}
+
+is_known_tool() {
+    local name="$1" tool
+    for tool in "${TOOLS[@]}"; do [[ "$name" == "$tool" ]] && return 0; done
+    return 1
+}
+
+is_disabled() {
+    local current=",${1}," name="$2"
+    [[ "$current" == *",$name,"* ]]
+}
+
+disabled_list() { env_get "$MAIN_ENV" MCP_DISABLED_TOOLS; }
+
+# Detectam si conectarile facute manual anterior (fara markerul mcpctl).
+rag_connected() {
+    [[ -f "$RAG_FLAG" ]] && return 0
+    command -v docker >/dev/null 2>&1 || return 1
+    local cid
+    cid="$(docker compose -f "$ROOT/compose.yaml" ps -aq mcp 2>/dev/null | head -n 1)" || return 1
+    [[ -n "$cid" ]] || return 1
+    docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$cid" 2>/dev/null |
+        grep -qx 'MCP_RAG_ENABLED=1'
+}
+
+mcp_compose() {
+    need_main_env
+    if rag_connected; then
+        need_rag_env
+        docker compose --env-file "$MAIN_ENV" --env-file "$RAG_ENV" \
+            -f "$ROOT/compose.yaml" -f "$ROOT/compose.rag.yaml" "$@"
+    else
+        docker compose -f "$ROOT/compose.yaml" "$@"
+    fi
+}
+
+rag_compose() {
+    need_rag_env
+    docker compose -f "$RAG/compose.yaml" "$@"
+}
+
+tool_list() {
+    local disabled tool state rag_state
+    disabled="$(disabled_list)"
+    if rag_connected; then rag_state=1; else rag_state=0; fi
+    printf '%-16s %s\n' 'TOOL' 'STATUS'
+    for tool in "${TOOLS[@]}"; do
+        if is_disabled "$disabled" "$tool"; then
+            state="disabled"
+        elif [[ "$tool" == "search_docs" || "$tool" == "get_text" ]] && (( ! rag_state )); then
+            state="unavailable (RAG neconectat)"
+        else
+            state="enabled"
+        fi
+        printf '%-16s %s\n' "$tool" "$state"
+    done
+}
+
+tool_change() {
+    local action="$1" name="$2" disabled new="" tool
+    is_known_tool "$name" || die "Tool necunoscut: $name (foloseste 'tools list')"
+    need_main_env
+    disabled="$(disabled_list)"
+    for tool in "${TOOLS[@]}"; do
+        if [[ "$tool" == "$name" ]]; then
+            [[ "$action" == "disable" ]] || continue
+        else
+            is_disabled "$disabled" "$tool" || continue
+        fi
+        [[ -z "$new" ]] && new="$tool" || new+=",$tool"
+    done
+    [[ "$new" == "$disabled" ]] && { info "Nicio schimbare."; return; }
+    need_docker
+    env_set "$MAIN_ENV" MCP_DISABLED_TOOLS "$new"
+    info "Aplic configuratia tool-urilor..."
+    mcp_compose up -d --no-deps --force-recreate mcp
+    tool_list
+}
+
+ensure_bridge_token() {
+    local token
+    token="$(env_get "$RAG_ENV" RAG_API_TOKEN)"
+    if [[ -z "$token" || "$token" == CHANGE_ME* ]]; then
+        command -v openssl >/dev/null 2>&1 || die "Este necesar openssl."
+        token="$(openssl rand -hex 32)"
+        env_set "$RAG_ENV" RAG_API_TOKEN "$token"
+        info "Am generat tokenul privat de acces RAG."
+    elif (( ${#token} < 32 )); then
+        die "RAG_API_TOKEN existent este prea scurt. Schimba-l manual in rag/.env."
+    fi
+}
+
+rag_enable() {
+    need_docker
+    need_main_env
+    need_rag_env
+    [[ -n "$(env_get "$RAG_ENV" RAG_DB_PASSWORD)" ]] || die "RAG_DB_PASSWORD nu este configurat."
+    ensure_bridge_token
+    if ! docker network inspect mcp-rag-link >/dev/null 2>&1; then
+        docker network create mcp-rag-link >/dev/null
+    fi
+    info "Pornesc API-ul RAG separat..."
+    docker compose --env-file "$RAG_ENV" -f "$RAG/compose.yaml" \
+        -f "$RAG/compose.mcp.yaml" up -d --build api
+    info "Activez instrumentele RAG in MCP..."
+    docker compose --env-file "$MAIN_ENV" --env-file "$RAG_ENV" \
+        -f "$ROOT/compose.yaml" -f "$ROOT/compose.rag.yaml" \
+        up -d --no-deps --build mcp
+    : > "$RAG_FLAG"
+    chmod 600 "$RAG_FLAG"
+    info "Integrare RAG activa. Nu am modificat baza sau documentele RAG."
+    tool_list
+}
+
+rag_disable() {
+    need_docker
+    need_main_env
+    if ! rag_connected; then
+        info "Integrarea este deja dezactivata."
+        return
+    fi
+    info "Revin la MCP independent..."
+    docker compose -f "$ROOT/compose.yaml" up -d --no-deps mcp
+    rm -f -- "$RAG_FLAG"
+    if [[ -f "$RAG_ENV" ]] && [[ -n "$(env_get "$RAG_ENV" RAG_API_TOKEN)" ]]; then
+        docker compose --env-file "$RAG_ENV" -f "$RAG/compose.yaml" \
+            -f "$RAG/compose.mcp.yaml" stop api
+    fi
+    info "Integrare dezactivata. RAG (documente + baza) este pastrat."
+}
+
+rag_status() {
+    need_docker
+    if rag_connected; then info "Legatura MCP ↔ RAG: activa"
+    else info "Legatura MCP ↔ RAG: dezactivata"; fi
+    docker ps --filter 'label=com.docker.compose.project=mcp-rag' \
+        --format 'table {{.Names}}\t{{.Status}}'
+}
+
+mcp_status() {
+    need_docker
+    info "MCP:"
+    docker compose -f "$ROOT/compose.yaml" ps
+    info ""
+    rag_status
+    info ""
+    tool_list
+}
+
+user_command() {
+    local action="$1"
+    shift
+    need_docker
+    need_main_env
+    case "$action" in
+        add|reset-password)
+            [[ $# == 1 ]] || die "Utilizare: user add EMAIL"
+            docker compose -f "$ROOT/compose.yaml" run --rm mcp \
+                python -m app.manage add-user "$1"
+            ;;
+        enable|disable)
+            [[ $# == 1 ]] || die "Utilizare: user $action EMAIL"
+            docker compose -f "$ROOT/compose.yaml" run --rm mcp \
+                python -m app.manage "$action-user" "$1"
+            ;;
+        list|clients)
+            [[ $# == 0 ]] || die "Comanda nu accepta argumente"
+            local command="list-users"
+            [[ "$action" == "clients" ]] && command="list-clients"
+            docker compose -f "$ROOT/compose.yaml" run --rm -T mcp python -m app.manage "$command"
+            ;;
+        *) die "Comanda user invalida. Foloseste: ./mcpctl help";;
+    esac
+}
+
+rag_command() {
+    local action="$1"
+    shift
+    case "$action" in
+        enable) [[ $# == 0 ]] || die "rag enable nu accepta argumente"; rag_enable ;;
+        disable) [[ $# == 0 ]] || die "rag disable nu accepta argumente"; rag_disable ;;
+        status) [[ $# == 0 ]] || die "rag status nu accepta argumente"; rag_status ;;
+        start)
+            [[ $# == 0 ]] || die "rag start nu accepta argumente"
+            need_docker
+            rag_compose up -d database
+            ;;
+        stop)
+            [[ $# == 0 ]] || die "rag stop nu accepta argumente"
+            need_docker
+            rag_connected && die "Dezactiveaza mai intai legatura: ./mcpctl rag disable"
+            rag_compose stop database
+            ;;
+        scan|verify|search)
+            need_docker
+            [[ "$action" != "verify" || $# == 0 ]] || die "rag verify nu accepta argumente"
+            if [[ "$action" == "search" ]]; then
+                [[ $# -ge 1 ]] || die "Utilizare: rag search 'intrebare'"
+            fi
+            rag_compose run --rm cli "$action" "$@"
+            ;;
+        *) die "Comanda rag invalida. Foloseste: ./mcpctl help";;
+    esac
+}
+
+mcp_command() {
+    local action="$1"
+    shift
+    [[ $# == 0 ]] || die "Comanda mcp nu accepta argumente"
+    need_docker
+    case "$action" in
+        start) mcp_compose up -d ;;
+        stop) docker compose -f "$ROOT/compose.yaml" stop mcp ;;
+        apply) mcp_compose up -d --no-deps --force-recreate mcp ;;
+        logs) docker compose -f "$ROOT/compose.yaml" logs -f --tail=100 mcp ;;
+        *) die "Comanda mcp invalida. Foloseste: ./mcpctl help";;
+    esac
+}
+
+main() {
+    local group="${1:-help}" action
+    [[ $# == 0 ]] || shift
+    case "$group" in
+        -h|--help|help) help_screen ;;
+        status) [[ $# == 0 ]] || die "status nu accepta argumente"; mcp_status ;;
+        user)
+            [[ $# -ge 1 ]] || die "Lipseste comanda user."
+            action="$1"; shift
+            user_command "$action" "$@"
+            ;;
+        tools)
+            [[ $# -ge 1 ]] || die "Lipseste comanda tools."
+            action="$1"; shift
+            case "$action" in
+                list) [[ $# == 0 ]] || die "tools list nu accepta argumente"; tool_list ;;
+                enable|disable) [[ $# == 1 ]] || die "Utilizare: tools $action NUME"; tool_change "$action" "$1" ;;
+                *) die "Comanda tools invalida. Foloseste: ./mcpctl help";;
+            esac
+            ;;
+        rag)
+            [[ $# -ge 1 ]] || die "Lipseste comanda rag."
+            action="$1"; shift
+            rag_command "$action" "$@"
+            ;;
+        mcp)
+            [[ $# -ge 1 ]] || die "Lipseste comanda mcp."
+            action="$1"; shift
+            mcp_command "$action" "$@"
+            ;;
+        *) die "Comanda necunoscuta: $group. Foloseste: ./mcpctl help";;
+    esac
+}
+main "$@"
