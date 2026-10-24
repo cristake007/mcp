@@ -13,7 +13,7 @@ async def main():
     enabled = os.getenv("MCP_RAG_ENABLED") == "1"
     expected = {"ping", "whoami", "inspect_site"}
     if enabled:
-        expected |= {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status", "corpus_health"}
+        expected |= {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status", "corpus_health", "get_page_image"}
     expected -= disabled
     assert tools == expected, (tools, expected)
 
@@ -24,7 +24,7 @@ async def main():
     isolated = FastMCP("optional-tools-test")
     register_rag_tools(isolated)
     custom = {tool.name: tool for tool in await isolated.list_tools()}
-    assert set(custom) == {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status", "corpus_health"} - disabled
+    assert set(custom) == {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status", "corpus_health", "get_page_image"} - disabled
     expected = "Art. 15\n  Verificare anuală.\n"
     if "corpus_stats" in custom:
         stats_result = {
@@ -76,6 +76,28 @@ async def main():
             result = await custom["corpus_health"].run({"offset": 0, "limit": 20})
             assert result.structured_content == health, result
             request.assert_called_once_with("/corpus-health", {"offset": 0, "limit": 20})
+
+    if "get_page_image" in custom:
+        import base64
+        from mcp.types import ImageContent, TextContent
+        jpeg = bytes([0xff, 0xd8, 0xff, 0xd9])
+        payload = {
+            "document_id": 14, "path": "manual.pdf", "page": 2,
+            "total_pages": 20, "mime_type": "image/jpeg",
+            "image_base64": base64.b64encode(jpeg).decode("ascii"),
+            "source_verified": True,
+        }
+        with patch("app.rag_tools._request", return_value=payload) as request:
+            result = await custom["get_page_image"].run({"document_id": 14, "page": 2})
+            assert len(result.content) == 2, result
+            assert isinstance(result.content[0], TextContent), result
+            assert "manual.pdf" in result.content[0].text, result
+            assert isinstance(result.content[1], ImageContent), result
+            assert result.content[1].mimeType == "image/jpeg", result
+            assert base64.b64decode(result.content[1].data) == jpeg, result
+            request.assert_called_once_with(
+                "/page-image", {"document_id": 14, "page": 2},
+            )
 
     if "get_text" not in custom:
         return
