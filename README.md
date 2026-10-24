@@ -40,6 +40,8 @@ and uses the working browser-like headers with `curl`.
 | `get` | `url="https://tuvkarpat.ro/cursuri/.../"` | Full ACF JSON for courses |
 | `get` | `url="https://tuvkarpat.ro/industriale/.../"` | HTML without scripts, meta, iframe, noscript, global Elementor header/footer |
 | `get` | `url="https://tuvkarpat.ro/2022/10/13/.../"` | WordPress post content.rendered (fallback to cleaned HTML) |
+| `batch_get` | `sitemap="cursuri-sitemap.xml"`, `offset`, `limit=5` | Up to 5 pages per call as labeled text, with pending parts and errors |
+| `get` | `url="https://tuvkarpat.ro/cursuri/.../"`, `view="text"`, `part`, `max_chars=12000`, `expected_hash` | Retrieve every remaining part of a long page |
 | `search` | `query="ISO 9606"`, `sitemap="all"`, `offset`, `limit` | Literal matching URLs, occurrences and snippets |
 
 `search` fetches at most 20 pages **per invocation**, using at most three
@@ -50,8 +52,25 @@ automatic Romanian diacritics checker.
 
 Only the exact HTTPS host `tuvkarpat.ro` is accepted. Redirects to other
 destinations are not followed. Remote fetching has time and size limits.
-HTML `get` responses can be limited by `max_chars`; inspect `truncated`
-and `total_chars`.
+Sitemap XML is cached in memory for 5 minutes, while page content is read live.
+`batch_get` supports a single sitemap at a time, accepts `offset` and
+`limit` (max 5 pages), and uses at most three concurrent requests. Each
+returned page has `content`, `total_chars`, `sha256`, `total_parts`,
+`next_part` and any `warnings`. The default maximum content per page
+is 12000 characters; there is **no silent truncation**. If `pending_parts`
+is nonempty, call `get` with the provided `retrieve_remaining` parameters
+and continue through `next_part` with the SAME `max_chars` and `expected_hash`.
+Changes to page content between parts produce a checksum mismatch, rather
+than silently mixing versions. `end_of_sitemap` means only the URL cursor
+is finished; audit completeness requires zero errors, no pending parts, and
+all batches inspected.
+
+`batch_get` extracts all ACF leaf text values with field paths and extracts
+body text (including unknown widgets and tables) from pages. It does not
+discard fields based on grammar, and does not analyze diacritics. HTML is
+fetched as delivered by WordPress; JavaScript-only additions are not verified.
+The legacy `get` (default `view="raw"`) still returns HTML or ACF JSON,
+and very large raw results expose retrievable parts instead of cutting data.
 
 Enable/disable this tool with `./mcpctl tools enable inspect_site` or
 `./mcpctl tools disable inspect_site`; apply to the running container via
