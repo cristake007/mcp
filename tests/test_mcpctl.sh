@@ -28,6 +28,7 @@ export MCPCTL_TEST_DOCKER_LOG="$TMP/docker.log"
 ctl() { bash "$TMP/mcpctl" "$@"; }
 
 ctl tools list | grep -q 'ping.*enabled'
+ctl tools list | grep -q 'corpus_stats.*unavailable'
 ctl tools disable whoami
 grep -qx 'MCP_DISABLED_TOOLS=whoami' "$TMP/.env"
 ctl tools list | grep -q 'whoami.*disabled'
@@ -54,11 +55,13 @@ grep -q 'up -d --build indexer api' "$TMP/docker.log"
 [[ -f "$TMP/.mcp-rag-enabled" ]]
 test -n "$(grep '^RAG_API_TOKEN=' "$TMP/rag/.env")"
 ctl tools list | grep -q 'get_text.*enabled'
+ctl tools list | grep -q 'corpus_stats.*enabled'
 ctl rag disable
 [[ ! -f "$TMP/.mcp-rag-enabled" ]]
 ctl rag stop
 grep -q 'stop indexer database' "$TMP/docker.log"
 ctl tools list | grep -q 'get_text.*unavailable'
+ctl tools list | grep -q 'corpus_stats.*unavailable'
 grep -qx 'POSTGRES_PASSWORD=CI_SECRET' "$TMP/.env"
 grep -qx 'RAG_DB_PASSWORD=CI_RAG_PASSWORD' "$TMP/rag/.env"
 ctl rag scan --lexical-only
