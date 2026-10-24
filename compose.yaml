@@ -26,6 +26,7 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set PUBLIC_BASE_URL in .env}
       LOGIN_COOKIE_KEY: ${LOGIN_COOKIE_KEY:?Set LOGIN_COOKIE_KEY in .env}
       OAUTH_ALLOWED_REDIRECT_HOSTS: ${OAUTH_ALLOWED_REDIRECT_HOSTS:-}
+      MCP_DISABLED_TOOLS: ${MCP_DISABLED_TOOLS:-}
       DATABASE_URL: postgresql://mcp:${POSTGRES_PASSWORD}@postgres:5432/mcp
     depends_on:
       postgres:
