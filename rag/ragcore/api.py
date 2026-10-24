@@ -3,6 +3,7 @@
 Only activated using rag/compose.mcp.yaml. It does not import MCP code,
 modify the MCP database, or run automatically with the normal RAG commands.
 """
+import asyncio
 import hmac
 import json
 import os
@@ -38,6 +39,27 @@ async def process(request: Request):
             raise ValueError("Expected JSON object")
         from . import store
         from .embeddings import enabled
+
+        if request.url.path == "/stats":
+            from .stats import corpus_stats
+            term = params.get("term")
+            second = params.get("second_term")
+            mode = params.get("mode", "all")
+            examples_limit = params.get("examples_limit", 10)
+            # Validate before opening a DB connection, including types.
+            from .stats import validate
+            validate(term, second, mode, examples_limit)
+
+            def calculate():
+                with store.connect() as stats_conn:
+                    return corpus_stats(
+                        stats_conn, term, second,
+                        mode=mode, examples_limit=examples_limit,
+                    )
+
+            # Full-corpus counting must not block the API event loop.
+            value = await asyncio.to_thread(calculate)
+            return JSONResponse(value, headers={"Cache-Control": "no-store"})
 
         with store.connect() as conn:
             if request.url.path == "/search":
@@ -85,6 +107,7 @@ async def process(request: Request):
 app = Starlette(routes=[
     Route("/search", process, methods=["POST"]),
     Route("/text", process, methods=["POST"]),
+    Route("/stats", process, methods=["POST"]),
 ])
 
 
