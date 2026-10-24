@@ -28,6 +28,7 @@ export MCPCTL_TEST_DOCKER_LOG="$TMP/docker.log"
 ctl() { bash "$TMP/mcpctl" "$@"; }
 
 ctl tools list | grep -q 'ping.*enabled'
+ctl tools list | grep -q 'inspect_site.*enabled'
 ctl tools list | grep -q 'corpus_stats.*unavailable'
 ctl tools disable whoami
 grep -qx 'MCP_DISABLED_TOOLS=whoami' "$TMP/.env"
