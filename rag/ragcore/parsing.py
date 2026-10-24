@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-SUPPORTED = {".pdf", ".docx", ".xlsx", ".txt", ".md", ".markdown"}
+SUPPORTED = {".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".md", ".markdown"}
 
 
 @dataclass(frozen=True)
@@ -53,6 +53,8 @@ def parse_file(path: Path) -> Parsed:
         return parse_pdf(path)
     if suffix == ".docx":
         return parse_docx(path)
+    if suffix == ".pptx":
+        return parse_pptx(path)
     return parse_xlsx(path)
 
 
@@ -122,6 +124,78 @@ def parse_docx(path: Path) -> Parsed:
                 xml = archive.read(name)
                 if b"txbxContent" in xml or b"w:ins" in xml or b"w:del" in xml:
                     result.warnings.append("DOCX has textboxes or tracked revisions; review original for omissions")
+    return result
+
+
+def parse_pptx(path: Path) -> Parsed:
+    """Read slide text, tables, groups and presenter notes without OCR.
+
+    Slide/source locations are retained. Shape enumeration follows document
+    XML/z-order rather than claiming a guaranteed visual reading order.
+    Embedded images, charts and SmartArt cannot be losslessly converted to
+    plain text; report that limitation per slide instead of inventing text.
+    """
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    result = Parsed(parser="python-pptx")
+    deck = Presentation(path)
+    for slide_number, slide in enumerate(deck.slides, start=1):
+        written = 0
+        omitted_images = 0
+        omitted_objects = 0
+
+        def read_shapes(shapes, ancestry: tuple[int, ...] = ()) -> None:
+            nonlocal written, omitted_images, omitted_objects
+            for shape in shapes:
+                ids = (*ancestry, shape.shape_id)
+                base = {
+                    "slide": slide_number,
+                    "shape_ids": list(ids),
+                    "shape_name": shape.name,
+                }
+                if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+                    read_shapes(shape.shapes, ids)
+                elif shape.has_table:
+                    for row_number, row in enumerate(shape.table.rows, start=1):
+                        for column_number, cell in enumerate(row.cells, start=1):
+                            if cell.text:
+                                result.append(cell.text, {
+                                    **base,
+                                    "kind": "pptx_table_cell",
+                                    "row": row_number,
+                                    "column": column_number,
+                                })
+                                written += 1
+                elif shape.has_text_frame:
+                    if shape.text:
+                        result.append(shape.text, {**base, "kind": "pptx_text"})
+                        written += 1
+                elif shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                    omitted_images += 1
+                elif shape.has_chart or shape.element.tag.endswith("}graphicFrame"):
+                    omitted_objects += 1
+
+        read_shapes(slide.shapes)
+        if slide.has_notes_slide:
+            notes = slide.notes_slide.notes_text_frame
+            if notes is not None and notes.text.strip():
+                result.append(notes.text, {
+                    "kind": "pptx_notes",
+                    "slide": slide_number,
+                })
+        if omitted_images:
+            result.warnings.append(
+                f"Slide {slide_number}: {omitted_images} image(s) not OCR-processed; text inside images is not indexed"
+            )
+        if omitted_objects:
+            result.warnings.append(
+                f"Slide {slide_number}: {omitted_objects} chart/diagram/embedded object(s) not fully parsed"
+            )
+        if not written:
+            result.warnings.append(
+                f"Slide {slide_number}: no extractable slide text; check images/diagrams or blank slide"
+            )
     return result
 
 
