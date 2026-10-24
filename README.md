@@ -22,6 +22,11 @@ Pentru administrare, foloseste `bash mcpctl help`. Comenzi disponibile:
 este globala pentru toti utilizatorii. RAG este separat si optional: `rag disable`
 nu sterge documentele sau baza RAG. Configurarea necesita Docker Compose v2.
 
+For exact RAG-wide document/article/mention counts, use the optional
+MCP tool `corpus_stats` or `./mcpctl rag stats "term"`.
+Two-term statistics distinguish occurrence in the same article from
+occurrence elsewhere in the same document. Results are literal, not semantic.
+
 ## 1. Configure
 
 Use a Linux host with Docker Compose and an existing HTTPS Nginx virtual host.
