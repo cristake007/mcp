@@ -73,6 +73,8 @@ jobs:
         run: |
           MCP_RAG_ENABLED=0 python -m tests.rag_optional
           MCP_RAG_ENABLED=1 MCP_RAG_URL=http://rag-api:8080 MCP_RAG_API_TOKEN=ci-bridge-long-secret-0123456789abcdef python -m tests.rag_optional
+      - name: Validate MCP Apps viewer and private image bridge
+        run: python -m tests.rag_viewer_optional
       - name: Test inspect_site (offline, no live site requests)
         run: python -m tests.site_inspector
       - name: Test selective tool registration
