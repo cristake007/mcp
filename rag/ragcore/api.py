@@ -66,6 +66,9 @@ async def process(request: Request):
         if request.url.path == "/page-image":
             document_id = params.get("document_id")
             page = params.get("page")
+            figure_id = params.get("figure_id")
+            if figure_id is not None and (type(figure_id) is not int or figure_id < 1):
+                raise ValueError("Invalid figure_id")
             if type(document_id) is not int or document_id < 1:
                 raise ValueError("Invalid document_id")
             if type(page) is not int or page < 1:
@@ -77,7 +80,7 @@ async def process(request: Request):
                 with store.connect() as image_conn:
                     return get_page_image(
                         image_conn, Path(os.environ.get("RAG_DOCUMENTS", "/documents")),
-                        document_id, page,
+                        document_id, page, figure_id=figure_id,
                     )
 
             # PDF rendering can be expensive. Keep it off the API event loop.
