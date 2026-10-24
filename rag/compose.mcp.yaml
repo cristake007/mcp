@@ -18,7 +18,10 @@ services:
       OMP_NUM_THREADS: "2"
     volumes:
       - model_cache:/model-cache
-    networks: [rag_private, mcp_rag_link]
+    networks:
+      rag_private: {}
+      mcp_rag_link:
+        aliases: [rag-api]
     depends_on:
       database:
         condition: service_healthy
