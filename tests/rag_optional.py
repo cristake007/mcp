@@ -43,6 +43,7 @@ async def main():
             request.assert_called_once_with("/stats", {
                 "term": "autorizare", "second_term": "suspendare",
                 "mode": "all", "examples_limit": 3,
+                "match_type": "linguistic",
             })
     if "get_text" not in custom:
         return
