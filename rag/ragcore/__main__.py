@@ -23,6 +23,7 @@ def parser():
     text.add_argument("document_id", type=int)
     text.add_argument("--start", type=int)
     text.add_argument("--end", type=int)
+    text.add_argument("--article", help="e.g. 34 or Art. 34 (full extracted article)")
     sub.add_parser("verify", help="Verify stored chunk content and coverage")
     sub.add_parser("status", help="Show document/chunk counts")
     return root
@@ -55,7 +56,7 @@ def main():
                 print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
             elif args.action == "get-text":
                 _, content = store.get_text(
-                    conn, args.document_id, args.start, args.end
+                    conn, args.document_id, args.start, args.end, article=args.article
                 )
                 # No metadata, quoting, whitespace changes or explanatory prose.
                 sys.stdout.write(content)
