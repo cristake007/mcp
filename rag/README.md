@@ -293,42 +293,44 @@ The first OCR pass over a large illustrated manual can use CPU for several
 minutes; the indexer remains single-process and non-destructive. The API
 never runs OCR per user question.
 
-### Interactive RAG viewer in ChatGPT (MCP Apps)
+### Interactive original FIGURE viewer in ChatGPT (MCP Apps)
 
-The optional MCP stack now exposes **`show_rag_sources`**, a renderer tool
-that opens a small, read-only HTML interface inside MCP Apps-capable clients
-such as ChatGPT. The original search and image tools remain independent;
-text-only clients receive structured/text results normally.
+The MCP App shows the **individual OCR-indexed figure** from the original
+local PDF as a cropped JPEG inside the ChatGPT conversation. It no longer
+opens an entire navigable PDF automatically.
 
-- `show_rag_sources(query="Ce conectori are MANTIS?")`: searches the
-  **local RAG only**, selects up to four grounded PDF pages, and opens the
-  page viewer automatically when the MCP host supports Apps.
-- `show_rag_sources(document_id=N, page=P)`: opens a specific indexed PDF
-  page, using IDs returned by `search_docs` (never invented).
-- The viewer shows document names, captions, OCR snippets, zoom, and previous/
-  next page navigation. This interface is static, bundled with the MCP image,
-  and does not load any script, stylesheet, font or image from the Internet.
-- The app-only tool `get_rag_page_data` transfers JPEG bytes from the
-  authenticated private `/page-image` RAG API. The API verifies the indexed
-  PDF SHA-256 before rendering every page; no static public document URL,
-  direct UI access to PostgreSQL, or PDF parsing by the model/client is used.
-- The HTML resource is `ui://rag/document-viewer/v1.html` with MIME type
-  `text/html;profile=mcp-app`, linked by `_meta.ui.resourceUri`. Other
-  clients continue to use `search_docs` and `get_page_image`.
+- `show_rag_sources(query="Ce conectori are MANTIS?")` prioritizes indexed
+  `ocr_figure` results with `figure_id` and displays their source images.
+  Distinct figures on one page are separate selectable images.
+- `show_rag_sources(document_id=N,page=P,figure_id=F)` shows the *exact*
+  source figure grounded in a `search_docs` hit.
+- `show_rag_sources(document_id=N,page=P)`, without a figure ID, obtains
+  the actual figures on that page from the private `/figures` API rather
+  than opening a complete PDF. The user selects the relevant figure if there
+  are several (e.g., MANTIS Figures 3 and 4 on page 12).
+- The page viewer's optional **Pagina completă** button is the only way to
+  switch from the figure image to an entire source page; it can be toggled
+  back to the individual figure. Navigation between PDF pages is available
+  only in this explicitly opened full-page mode.
+- Images come exclusively from the authenticated private `/page-image`
+  endpoint, which checks the document's index SHA-256 and figures'
+  `document_id`, `page` and `figure_id` relationships. Indexed
+  coordinate rectangles are used for cropping; caller-provided arbitrary
+  crop coordinates are **not** accepted.
+- The sandboxed viewer calls `get_rag_page_data` (app-only) for each image.
+  No web search, hosted image service, PDF parsing by ChatGPT, external
+  iframe, public URL or new database/storage component is required.
 
-**Limitations:** ChatGPT must choose the `show_rag_sources` tool (or you
-select the MCP connector explicitly). The server cannot guarantee model
-tool selection, prevent web browsing elsewhere, or require the client to
-render an iframe. The view displays **full original PDF pages**, not cropped
-figures, and its suggested pages may include imperfect OCR matches. It
-does not alter indexed document data or existing search rankings.
+The MCP resource `ui://rag/document-viewer/v1.html` is associated with
+the tool through `_meta.ui.resourceUri`. `get_page_image` continues to
+work for other MCP clients and now also accepts optional `figure_id`.
+Omitting this ID retains the original full-page behavior.
 
-Refresh tools after restarting the MCP server to discover
-`show_rag_sources`. If the MCP Apps view is not supported or a UI call
-fails, request the normal `get_page_image` tool or inspect source metadata.
-Disable both viewer tools if you don't want this UI:
-`./mcpctl tools disable show_rag_sources` and
-`./mcpctl tools disable get_rag_page_data`.
+The host must still select `show_rag_sources` for the app to open. A model
+may choose other tools, and crop relevance still depends on OCR retrieval.
+This UI cannot force ChatGPT not to browse the web or guarantee rendering in
+every client. The source documents and OCR index require **no reindexing**
+for this display-only update.
 
 ### Images from indexed PDF manuals: `get_page_image`
 
@@ -338,7 +340,9 @@ illustration* while answering a question, use `get_page_image` with the
 `document_id` from the search result and a **real PDF page number** from its
 location metadata. The tool returns two native MCP content blocks: a text
 description with source path/page and an `image/jpeg` image of the
-**complete original PDF page**. It does not generate or invent an illustration.
+**complete original PDF page** when `figure_id` is omitted, or
+the **cropped original figure** when a figure ID is supplied by
+`search_docs`. It does not generate or invent an illustration.
 
 `get_page_image(document_id=12, page=13)`
 
