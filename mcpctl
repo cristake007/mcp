@@ -40,6 +40,7 @@ MCP Control — comenzi administrative (din orice director)
   ./mcpctl rag verify                Verifica exactitatea fragmentelor
   ./mcpctl rag logs                  Loguri indexare automata
   ./mcpctl rag search "intrebare"    Cauta in documentele indexate
+  ./mcpctl rag stats "termen"        Statistici exacte pe toate documentele
 
   ./mcpctl mcp start                 Porneste MCP (+ baza sa)
   ./mcpctl mcp stop                  Opreste doar aplicatia MCP
@@ -299,11 +300,11 @@ rag_command() {
             need_docker
             rag_compose logs -f --tail=100 indexer
             ;;
-        scan|verify|search)
+        scan|verify|search|stats)
             need_docker
             [[ "$action" != "verify" || $# == 0 ]] || die "rag verify nu accepta argumente"
-            if [[ "$action" == "search" ]]; then
-                [[ $# -ge 1 ]] || die "Utilizare: rag search 'intrebare'"
+            if [[ "$action" == "search" || "$action" == "stats" ]]; then
+                [[ $# -ge 1 ]] || die "Utilizare: rag $action 'termen sau intrebare'"
             fi
             rag_compose run --rm cli "$action" "$@"
             ;;
