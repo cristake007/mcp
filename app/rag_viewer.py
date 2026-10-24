@@ -112,16 +112,38 @@ def register_rag_viewer(server: FastMCP, request: Callable) -> None:
             path = metadata.get("path", "")
             if not isinstance(path, str) or not path.lower().endswith(".pdf"):
                 raise ValueError("Source is not an indexed PDF")
-            item = {
+            selected = []
+            if figure_id is not None:
+                # The image endpoint verifies the figure-page relationship.
+                selected = [{"figure_id": figure_id, "caption": "", "excerpt": "",
+                             "ocr_confidence": None}]
+            else:
+                # When a model supplies only document_id+page (the common
+                # case), prefer ALL figures indexed on that page to a PDF
+                # preview. Avoid guessing the specific figure intended.
+                response = await asyncio.to_thread(
+                    request, "/figures", {"document_id": document_id, "page": page},
+                )
+                selected = (response.get("figures") or [])[:max_pages]
+            items = [{
                 "document_id": document_id, "page": page, "path": path,
-                "figure_id": figure_id,
-                "caption": "", "source_type": "selected_figure" if figure_id else "selected_page",
-                "excerpt": "", "ocr_confidence": None,
-            }
+                "figure_id": entry.get("figure_id"),
+                "caption": str(entry.get("caption") or ""),
+                "source_type": "selected_figure" if entry.get("figure_id") else "selected_page",
+                "excerpt": str(entry.get("excerpt") or "")[:1300],
+                "ocr_confidence": entry.get("ocr_confidence"),
+            } for entry in selected]
+            if not items:
+                items = [{
+                    "document_id": document_id, "page": page, "path": path,
+                    "figure_id": None, "caption": "", "source_type": "selected_page",
+                    "excerpt": "", "ocr_confidence": None,
+                }]
             return {
-                "query": "", "sources": [item], "pages": [item],
+                "query": "", "sources": items, "pages": items,
                 "source_policy": "local_rag_only",
-                "note": "The viewer loads a SHA-256-verified page using the local RAG MCP bridge.",
+                "note": "The viewer shows original indexed figures first; "
+                        "complete pages require an explicit user action.",
             }
 
         query = query.strip()
