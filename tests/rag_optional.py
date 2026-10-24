@@ -11,7 +11,7 @@ async def main():
     tools = {tool.name for tool in await mcp.list_tools()}
     disabled = {name.strip() for name in os.getenv("MCP_DISABLED_TOOLS", "").split(",") if name.strip()}
     enabled = os.getenv("MCP_RAG_ENABLED") == "1"
-    expected = {"ping", "whoami"}
+    expected = {"ping", "whoami", "inspect_site"}
     if enabled:
         expected |= {"search_docs", "get_text", "corpus_stats"}
     expected -= disabled
