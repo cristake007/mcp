@@ -18,8 +18,8 @@ def normalize_fields(fields: list[str] | None) -> tuple[str, ...] | None:
     for item in fields:
         if not isinstance(item, str):
             raise ValueError("Selectorul trebuie să fie text")
-        candidate = item if item == "title" or item.startswith("acf.") else "acf." + item
-        if not re.fullmatch(r"title|acf\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+|\[\d+\])*", candidate):
+        candidate = item if item in ("title", "html.body") or item.startswith("acf.") else "acf." + item
+        if not re.fullmatch(r"title|html\.body|acf\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+|\[\d+\])*", candidate):
             raise ValueError("Selector fields invalid: " + item[:80])
         if candidate not in result:
             result.append(candidate)
