@@ -227,3 +227,8 @@ def register_rag_tools(server: FastMCP) -> None:
         server.tool()(get_text)
     if tool_enabled("corpus_stats"):
         server.tool()(corpus_stats)
+
+    # The HTML resource and UI-only page tool are entirely optional.
+    # Original text/image tools remain available to non-MCP-Apps clients.
+    from app.rag_viewer import register_rag_viewer
+    register_rag_viewer(server, _request)
