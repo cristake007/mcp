@@ -183,10 +183,17 @@ class CorpusStatsAPITests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(data["occurrences_per_term"], [1, 2])
                     self.assertEqual(data["document_examples"], [])
                     self.assertTrue(data["exhaustive_counts"])
+                    strict_response = await client.post(
+                        "/stats", headers=headers,
+                        json={"term": "suspendare", "match_type": "exact"},
+                    )
+                    self.assertEqual(strict_response.status_code, 200, strict_response.text)
+                    self.assertEqual(strict_response.json()["match_type"], "exact")
                     for invalid in (
                         {"term": ""},
                         {"term": 15},
                         {"term": "ISO", "mode": "neither"},
+                        {"term": "ISO", "match_type": "unknown"},
                         {"term": "ISO", "examples_limit": 30},
                         {"term": "ISO", "examples_limit": True},
                     ):
