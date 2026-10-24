@@ -146,7 +146,7 @@ def search(conn, query: str, *, limit: int = 8, use_vectors: bool = True) -> lis
 
     # Strip common Romanian conversational words from the forgiving lexical
     # branch. Keep the strict query separately for precise legal citations.
-    words = re.findall(r"[^\\W_]+(?:-[^\\W_]+)*", query.lower(), re.UNICODE)
+    words = re.findall(r"[^\W_]+", query.lower(), re.UNICODE)
     stop = {
         "care", "ce", "cum", "este", "sunt", "pentru", "despre", "din", "de", "la",
         "cu", "și", "si", "sau", "ale", "al", "a", "în", "in", "pe", "un", "o",
