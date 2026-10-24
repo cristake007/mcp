@@ -359,25 +359,38 @@ def inspect_site(
     offset: int = 0,
     limit: int = 20,
     max_chars: int = 60000,
+    view: str = "raw",
+    part: int = 0,
+    expected_hash: str = "",
 ) -> dict:
-    """Inspect live tuvkarpat.ro content.
+    """Inspect live tuvkarpat.ro through one MCP tool.
 
-    action='sitemaps': list available sitemaps.
-    action='urls': list paginated URLs from sitemap='industriale-sitemap.xml'.
-    action='get': retrieve URL content (ACF JSON for courses, HTML for posts/pages).
-    action='search': exact case-insensitive phrase search over sitemap='all' (default)
-      or one sitemap. Searches only a bounded page batch per call. Follow
-      next_offset until it is null; results are NOT exhaustive before then.
-    Only the public tuvkarpat.ro HTTPS host is queried. No semantic inference.
+    sitemaps: list all advertised sitemaps.
+    urls: paginated URLs for an explicit sitemap.
+    get: retrieve a URL, view='raw' for HTML / ACF, view='text' for all
+      visible HTML text or all ACF text fields (labeled with paths). For a large
+      page request each next_part using the same max_chars and expected_hash.
+    batch_get: retrieve up to five pages per call from an explicit sitemap.
+      Default batch text limit is 12000 characters PER page, with additional
+      parts recoverable through get(view='text', part=...).
+      Follow both next_offset and pending_parts; inspect all errors.
+    search: literal case-insensitive match, maximum twenty URLs per call.
+    Diacritics and grammar must be interpreted by the LLM, not this tool.
     """
-    if action not in ("sitemaps", "urls", "get", "search"):
-        raise ValueError("Acțiune invalidă: sitemaps, urls, get, search")
+    if action not in ("sitemaps", "urls", "get", "batch_get", "search"):
+        raise ValueError("Acțiune invalidă: sitemaps, urls, get, batch_get, search")
     if not 0 <= offset <= 100000:
         raise ValueError("offset trebuie să fie între 0 și 100000")
     if not 1 <= limit <= 100:
         raise ValueError("limit trebuie să fie între 1 și 100")
     if not 1000 <= max_chars <= 250000:
         raise ValueError("max_chars trebuie să fie între 1000 și 250000")
+    if part < 0:
+        raise ValueError("part trebuie să fie >= 0")
+    if expected_hash and not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        raise ValueError("expected_hash trebuie să fie un SHA-256 hexadecimal")
+    if view not in ("raw", "text"):
+        raise ValueError("view trebuie să fie raw sau text")
 
     if action == "sitemaps":
         return {"action": action, "sitemaps": _sitemaps()}
@@ -385,29 +398,88 @@ def inspect_site(
     if action == "urls":
         selected = _sitemap_url(sitemap, _sitemaps())
         urls = _urls(selected)
-        part = urls[offset:offset + limit]
-        nxt = offset + len(part)
+        subset = urls[offset:offset + limit]
+        next_offset = offset + len(subset)
         return {
             "action": action, "sitemap": selected, "total": len(urls),
-            "offset": offset, "urls": part,
-            "next_offset": nxt if nxt < len(urls) else None,
+            "offset": offset, "urls": subset,
+            "next_offset": next_offset if next_offset < len(urls) else None,
         }
 
     if action == "get":
         if not url:
             raise ValueError("Precizează url")
         data = _read_page(url)
-        if "html" in data:
-            original = data["html"]
-            data["html"] = original[:max_chars]
-            data["truncated"] = len(original) > max_chars
-            data["total_chars"] = len(original)
-        return {"action": action, **data}
+        if view == "text":
+            text, warnings = _audit_text(data)
+            chunks = _page_chunks(text, part, max_chars, expected_hash)
+            return {
+                "action": action, "url": url, "view": view,
+                "format": data["format"], "warnings": warnings, **chunks,
+            }
+        if data["format"] == "acf_json":
+            payload = json.dumps(data, ensure_ascii=False)
+            chunks = _page_chunks(payload, part, max_chars, expected_hash)
+            if chunks["total_parts"] == 1:
+                return {
+                    "action": action, **data, "content_complete": True,
+                    "total_chars": chunks["total_chars"], "total_parts": 1,
+                    "part": 0, "sha256": chunks["sha256"],
+                }
+            return {
+                "action": action, "url": url, "format": "acf_json",
+                "encoding": "json", "fragment": chunks["content"],
+                **{k: v for k, v in chunks.items() if k != "content"},
+            }
+        chunks = _page_chunks(data["html"], part, max_chars, expected_hash)
+        return {
+            "action": action, **{k: v for k, v in data.items() if k != "html"},
+            "html": chunks["content"],
+            **{k: v for k, v in chunks.items() if k != "content"},
+            "truncated": chunks["next_part"] is not None,
+        }
+
+    if action == "batch_get":
+        if not sitemap or sitemap == "all":
+            raise ValueError("batch_get necesită un singur sitemap explicit")
+        selected = _sitemap_url(sitemap, _sitemaps())
+        urls = _urls(selected)
+        batch_limit = min(limit, BATCH_MAX_PAGES)
+        current = urls[offset:offset + batch_limit]
+        chars_per_page = min(max_chars, BATCH_CHARS_PER_PAGE)
+        pages = []
+        errors = []
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(_batch_page, item, chars_per_page) for item in current]
+            for item, future in zip(current, futures):
+                try:
+                    pages.append(future.result())
+                except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+                    errors.append({"url": item, "error": str(exc)[:300]})
+        next_offset = offset + len(current)
+        pending = [
+            {"url": p["url"], "retrieve_remaining": p["retrieve_remaining"]}
+            for p in pages if p["next_part"] is not None
+        ]
+        return {
+            "action": action, "sitemap": selected, "total_urls": len(urls),
+            "offset": offset, "requested_limit": limit,
+            "processed": len(current), "pages": pages, "errors": errors,
+            "next_offset": next_offset if next_offset < len(urls) else None,
+            "end_of_sitemap": next_offset >= len(urls),
+            "batch_complete": not errors and not pending
+                              and all(not p["warnings"] for p in pages),
+            "pending_parts": pending,
+            "note": (
+                "end_of_sitemap describes URL pagination only. "
+                "Do not claim an exhaustive audit until all batches, errors "
+                "and pending parts have been reviewed. HTML is not JS-rendered."
+            ),
+        }
 
     if not query or not query.strip() or len(query) > 200:
         raise ValueError("query trebuie să conțină între 1 și 200 de caractere")
     entries = _search_entries(sitemap)
-    # Protect the website against unbounded scans per tool invocation.
     scan_count = min(limit, 20)
     batch = entries[offset:offset + scan_count]
     matches = []
