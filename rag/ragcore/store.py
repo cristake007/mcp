@@ -171,11 +171,20 @@ def search(conn, query: str, *, limit: int = 8, use_vectors: bool = True) -> lis
         )
         rankings.append((1.6, [row["id"] for row in cur.fetchall()]))
         if or_query:
+            # Avoid one-word false positives, e.g. 'ISO 9001' must not
+            # return documents that only contain 'ISO 14001'.
+            minimum_match = 2 if len(terms) >= 2 else 1
+            match_count_sql = " + ".join(
+                "(tsv @@ plainto_tsquery('romanian', %s))::int"
+                for _ in terms[:12]
+            )
             cur.execute(
-                """SELECT id FROM rag_chunks
+                f"""SELECT id FROM rag_chunks
                 WHERE tsv @@ to_tsquery('romanian', %s)
+                  AND ({match_count_sql}) >= %s
                 ORDER BY ts_rank_cd(tsv, to_tsquery('romanian', %s)) DESC, id
-                LIMIT 40""", (or_query, or_query),
+                LIMIT 40""",
+                (or_query, *terms[:12], minimum_match, or_query),
             )
             rankings.append((0.8, [row["id"] for row in cur.fetchall()]))
         if use_vectors:
