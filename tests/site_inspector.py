@@ -178,7 +178,7 @@ class SiteInspectorTests(unittest.TestCase):
             self.assertEqual(len(expected), page["total_chars"])
 
     def test_batch_get_handles_errors_and_limited_pages(self):
-        urls = [f"https://tuvkarpat.ro/cursuri/{i}/" for i in range(8)]
+        urls = [f"https://tuvkarpat.ro/cursuri/{i}/" for i in range(13)]
         def read(url):
             if url.endswith("/2/"):
                 raise RuntimeError("HTTP 429")
@@ -191,13 +191,13 @@ class SiteInspectorTests(unittest.TestCase):
             patch.object(site, "_read_page", side_effect=read) as reader,
         ):
             result = site.inspect_site("batch_get", sitemap="cursuri-sitemap.xml", limit=25)
-            self.assertEqual(result["processed"], 5)
-            self.assertEqual(result["next_offset"], 5)
+            self.assertEqual(result["processed"], 10)
+            self.assertEqual(result["next_offset"], 10)
             self.assertFalse(result["batch_complete"])
             self.assertEqual(len(result["errors"]), 1)
             self.assertTrue(result["errors"][0]["url"].endswith("/2/"))
-            self.assertEqual(reader.call_count, 5)
-            last = site.inspect_site("batch_get", sitemap="cursuri-sitemap.xml", offset=5)
+            self.assertEqual(reader.call_count, 10)
+            last = site.inspect_site("batch_get", sitemap="cursuri-sitemap.xml", offset=10)
             self.assertEqual(last["processed"], 3)
             self.assertTrue(last["batch_complete"])
             self.assertTrue(last["end_of_sitemap"])
@@ -491,6 +491,120 @@ class SiteInspectorTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 site.inspect_site("audit_ack", reviews=[{"url": url}])
             save_review.assert_not_called()
+
+
+
+    def test_optimized_batch_covers_195_courses_in_20_calls(self):
+        sitemap = "https://tuvkarpat.ro/cursuri-sitemap.xml"
+        archive = "https://tuvkarpat.ro/cursuri/"
+        urls = [f"https://tuvkarpat.ro/cursuri/curs-{n}/" for n in range(195)]
+        seen = []
+        def read(url):
+            seen.append(url)
+            return {"url": url, "format": "acf_json", "title": "Curs",
+                    "acf": {"tematica": "Pregătire profesională"}}
+        with (patch.object(site, "_sitemaps", return_value=[sitemap]),
+              patch.object(site, "_urls", return_value=[archive] + urls),
+              patch.object(site, "_read_page", side_effect=read)):
+            offset, rounds, fetched = 0, 0, []
+            while True:
+                batch = site.inspect_site(
+                    "batch_get", sitemap="cursuri-sitemap.xml", offset=offset,
+                    fields=["title", "acf.tematica"])
+                rounds += 1
+                self.assertLessEqual(batch["processed"], 10)
+                self.assertTrue(batch["batch_complete"])
+                self.assertEqual(batch["auditable_urls"], 195)
+                fetched.extend(x["url"] for x in batch["pages"])
+                if batch["next_offset"] is None:
+                    break
+                offset = batch["next_offset"]
+            self.assertEqual(rounds, 20)
+            self.assertEqual(fetched, urls)
+            self.assertEqual(set(seen), set(urls))
+            self.assertEqual(len(seen), 195)
+
+    def test_search_many_fetches_once_and_keeps_multi_term_counts(self):
+        entries = [("https://tuvkarpat.ro/cursuri/test/",
+                    "https://tuvkarpat.ro/cursuri-sitemap.xml")]
+        page = {"format": "acf_json", "title": "ISO 9001",
+                "acf": {"tematica": "ISO 9001 și ISO 90010. munca și muncă. "
+                                     "țară, tara, ŢARĂ și ȚARĂ."}}
+        with (patch.object(site, "_search_entries", return_value=entries),
+              patch.object(site, "_read_page", return_value=page) as reader):
+            exact = site.inspect_site(
+                "search_many", queries=["ISO 9001", "munca"], match_mode="exact",
+                sitemap="cursuri-sitemap.xml")
+            self.assertEqual(reader.call_count, 1)
+            self.assertTrue(exact["complete"])
+            self.assertEqual([x["occurrences"] for x in exact["matches"][0]["terms"]],
+                             [3, 1])
+            self.assertEqual(exact["query_totals"][0]["matching_urls"], 1)
+            self.assertEqual(exact["query_totals"][0]["occurrences"], 3)
+            self.assertEqual(exact["totals_scope"], "current_batch")
+
+            whole_word = site.inspect_site(
+                "search_many", queries=["ISO 9001", "munca"],
+                match_mode="whole_word")
+            self.assertEqual([x["occurrences"] for x in whole_word["matches"][0]["terms"]],
+                             [2, 1])
+            accent = site.inspect_site(
+                "search_many", queries=["munca", "tara"],
+                match_mode="accent_insensitive")
+            term_counts = {t["query"]: t["occurrences"] for t in accent["matches"][0]["terms"]}
+            self.assertEqual(term_counts, {"munca": 2, "tara": 4})
+            text = site._as_search_text(page)
+            for term in accent["matches"][0]["terms"]:
+                for span in term["positions"]:
+                    match = text[span["start"]:span["end"]]
+                    folded, _ = site._accent_fold_with_positions(match)
+                    self.assertEqual(folded, term["query"])
+
+    def test_search_many_works_with_special_punctuation_and_accents(self):
+        entries = [("https://tuvkarpat.ro/pagina/", "https://tuvkarpat.ro/page-sitemap.xml")]
+        page = {"url": entries[0][0], "format": "page_html",
+                "html": "<main>(ISO 9606) și t\u0326ara, țara, ştiinţă, știință.</main>"}
+        with (patch.object(site, "_search_entries", return_value=entries),
+              patch.object(site, "_read_page", return_value=page)):
+            exact = site.inspect_site("search_many", queries=["(ISO 9606)"])
+            self.assertEqual(exact["matches"][0]["terms"][0]["occurrences"], 1)
+            folded = site.inspect_site("search_many", queries=["tara", "stiinta"],
+                                       match_mode="accent_insensitive")
+            self.assertEqual([p["occurrences"] for p in folded["matches"][0]["terms"]],
+                             [2, 2])
+            content = site._as_search_text(page)
+            for term in folded["matches"][0]["terms"]:
+                for span in term["positions"]:
+                    self.assertIn(term["query"], site._accent_fold_with_positions(
+                        content[span["start"]:span["end"]])[0])
+
+    def test_search_many_error_pagination_and_strict_validation(self):
+        entries = [(f"https://tuvkarpat.ro/test/{n}/", "https://tuvkarpat.ro/page-sitemap.xml")
+                   for n in range(3)]
+        def read(url):
+            if url == entries[1][0]:
+                raise RuntimeError("HTTP 429")
+            return {"url": url, "format": "page_html", "html": "<p>Test ISO 9606</p>"}
+        with (patch.object(site, "_search_entries", return_value=entries),
+              patch.object(site, "_read_page", side_effect=read) as reader):
+            first = site.inspect_site("search_many", queries=["ISO 9606"],
+                                      limit=2)
+            self.assertFalse(first["complete"])
+            self.assertEqual(first["next_offset"], 2)
+            self.assertEqual(first["scanned"], 2)
+            self.assertEqual(len(first["errors"]), 1)
+            second = site.inspect_site("search_many", queries=["ISO 9606"],
+                                       offset=2, limit=2)
+            self.assertTrue(second["complete"])
+            self.assertIsNone(second["next_offset"])
+            self.assertEqual(reader.call_count, 3)
+        for kwargs in (
+            {"queries": []}, {"queries": "ISO"}, {"queries": ["   "]},
+            {"queries": ["a"] * 11}, {"queries": ["ISO", "iso"]},
+            {"queries": ["ABC"], "match_mode": "regex"},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                site.inspect_site("search_many", **kwargs)
 
 
 
