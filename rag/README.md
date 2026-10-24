@@ -72,14 +72,14 @@ the optional MCP bridge, if it is active).
 
 ### Manual diagnostics (optional)
 
-## First run
+The indexer initializes the schema itself. You do not need to run these
+commands for normal operation, but they remain available for troubleshooting:
 
 ```bash
-docker compose up -d database
-docker compose run --rm cli init
-docker compose run --rm cli scan
+cd /opt/mcp/rag
 docker compose run --rm cli verify
 docker compose run --rm cli status
+docker compose run --rm cli scan
 ```
 
 The first semantic scan downloads `intfloat/multilingual-e5-small` ONNX
