@@ -10,10 +10,14 @@ CREATE TABLE IF NOT EXISTS rag_documents (
     warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
     embedding_model TEXT NOT NULL DEFAULT 'none',
     indexed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    ocr_version INTEGER NOT NULL DEFAULT 0
+    ocr_version INTEGER NOT NULL DEFAULT 0,
+    orientation_version INTEGER NOT NULL DEFAULT 0,
+    page_rotations JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 -- Additive migration for already deployed PostgreSQL volumes.
 ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS ocr_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS orientation_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS page_rotations JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS rag_chunks (
     id BIGSERIAL PRIMARY KEY,
