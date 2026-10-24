@@ -151,6 +151,24 @@ def register_rag_tools(server: FastMCP) -> None:
             _request, "/document-status", {"document_id": document_id},
         )
 
+    async def corpus_health(offset: int = 0, limit: int = 50) -> dict:
+        """Compare live RAG documents directory to indexed PostgreSQL file hashes.
+
+        Detect new/unindexed, modified, missing, unsupported and unreadable
+        files. Counts cover the entire directory; paths are paginated.
+        Read-only. Not an atomic cross-filesystem/database snapshot; check
+        source_mount_warning and follow next_offset for every file.
+        """
+        if type(offset) is not int or not 0 <= offset <= 100000:
+            raise ValueError("offset must be between 0 and 100000")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        return await asyncio.to_thread(
+            _request, "/corpus-health", {"offset": offset, "limit": limit},
+        )
+
+    if tool_enabled("corpus_health"):
+        server.tool()(corpus_health)
     if tool_enabled("list_docs"):
         server.tool()(list_docs)
     if tool_enabled("document_status"):
