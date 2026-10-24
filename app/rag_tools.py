@@ -123,6 +123,38 @@ def register_rag_tools(server: FastMCP) -> None:
              "match_type": match_type},
         )
 
+    async def list_docs(offset: int = 0, limit: int = 50) -> dict:
+        """List indexed RAG documents: paths, chunk/embedding counts and warnings.
+
+        Paginated metadata only; no raw document text. Data comes from the
+        isolated PostgreSQL index, not a live source-file scan. Follow
+        next_offset for the complete list.
+        """
+        if type(offset) is not int or not 0 <= offset <= 100000:
+            raise ValueError("offset must be between 0 and 100000")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        return await asyncio.to_thread(
+            _request, "/documents", {"offset": offset, "limit": limit},
+        )
+
+    async def document_status(document_id: int) -> dict:
+        """Inspect RAG index integrity for a document ID from list_docs/search_docs.
+
+        Checks stored text coverage, chunk integrity, embeddings and parser
+        warnings. Does not compare to a live original file: the RAG API
+        intentionally has no document-folder mount.
+        """
+        if type(document_id) is not int or document_id <= 0:
+            raise ValueError("Invalid document ID")
+        return await asyncio.to_thread(
+            _request, "/document-status", {"document_id": document_id},
+        )
+
+    if tool_enabled("list_docs"):
+        server.tool()(list_docs)
+    if tool_enabled("document_status"):
+        server.tool()(document_status)
     if tool_enabled("search_docs"):
         server.tool()(search_docs)
     if tool_enabled("get_text"):
