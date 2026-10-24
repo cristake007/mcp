@@ -177,25 +177,30 @@ def register_rag_tools(server: FastMCP) -> None:
             _request, "/corpus-health", {"offset": offset, "limit": limit},
         )
 
-    async def get_page_image(document_id: int, page: int):
+    async def get_page_image(document_id: int, page: int,
+                             figure_id: int | None = None):
         """Return an actual image of a page from a PDF indexed in local RAG.
 
         Use a PDF page number grounded in search_docs results[].locations
         (kind='pdf_page', page=N); never infer a page from char offsets.
         Works only when the original PDF has the SHA-256 saved in PostgreSQL.
         Returns the source document path and original page number followed by
-        an MCP image block (JPEG rendering of the PDF page). No generated
-        images, OCR, public URLs, external providers, or writable mounts.
-        Client UI image-display support may vary. Image is a complete page,
-        not an automatically cropped figure.
+        an MCP JPEG image block. If search_docs reports figure.figure_id,
+        pass it here to show only that indexed figure (rather than the PDF
+        page). Otherwise returns the entire original page. No web images,
+        standalone PDF processing, generated graphics or public URLs.
+        Client UI image-display support may vary.
         """
         if type(document_id) is not int or document_id < 1:
             raise ValueError("document_id must be positive")
         if type(page) is not int or page < 1:
             raise ValueError("page must be positive")
-        response = await asyncio.to_thread(
-            _request, "/page-image", {"document_id": document_id, "page": page},
-        )
+        if figure_id is not None and (type(figure_id) is not int or figure_id < 1):
+            raise ValueError("figure_id must be positive")
+        parameters = {"document_id": document_id, "page": page}
+        if figure_id is not None:
+            parameters["figure_id"] = figure_id
+        response = await asyncio.to_thread(_request, "/page-image", parameters)
         encoded = response.pop("image_base64", None)
         if not isinstance(encoded, str) or response.get("mime_type") != "image/jpeg":
             raise RuntimeError("Invalid PDF page image response")
@@ -208,8 +213,9 @@ def register_rag_tools(server: FastMCP) -> None:
         description = (
             f"Imagine originală din documentul RAG: {response['path']}, "
             f"pagina PDF {response['page']}/{response['total_pages']}. "
-            "Randare a paginii complete din versiunea indexată verificată SHA-256; "
-            "nu este o ilustrație generată de AI."
+            + (f"Figura {figure_id} decupată din PDF-ul original. "
+               if figure_id is not None else "Pagina completă. ")
+            + "Sursă verificată SHA-256; nu este o imagine generată de AI."
         )
         return [description, Image(data=payload, format="jpeg")]
 
