@@ -277,26 +277,110 @@ def search(conn, query: str, *, limit: int = 8, use_vectors: bool = True) -> lis
             for position, chunk_id in enumerate(ranking, start=1):
                 scores[chunk_id] = scores.get(chunk_id, 0) + weight / (60 + position)
         top = sorted(scores, key=lambda item: (-scores[item], item))[:limit]
-        if not top:
-            return []
-        cur.execute(
-            """SELECT c.id, c.document_id, d.path, d.raw_text,
-                      c.char_start, c.char_end, c.content, c.locations
-            FROM rag_chunks c JOIN rag_documents d ON d.id=c.document_id
-            WHERE c.id=ANY(%s)""", (top,),
-        )
-        rows = {row["id"]: row for row in cur.fetchall()}
         output = []
-        for chunk_id in top:
-            record = rows[chunk_id]
-            raw = record.pop("raw_text")
-            article = article_for_hit(raw, record["char_start"], record["char_end"], query)
-            output.append({
-                **record,
-                "article": article.info(include_text=raw) if article else None,
-                "rrf_score": scores[chunk_id],
-            })
-        return output
+        if top:
+            cur.execute(
+                """SELECT c.id, c.document_id, d.path, d.raw_text,
+                          c.char_start, c.char_end, c.content, c.locations
+                FROM rag_chunks c JOIN rag_documents d ON d.id=c.document_id
+                WHERE c.id=ANY(%s)""", (top,),
+            )
+            rows = {row["id"]: row for row in cur.fetchall()}
+            for chunk_id in top:
+                record = rows[chunk_id]
+                raw = record.pop("raw_text")
+                article = article_for_hit(raw, record["char_start"], record["char_end"], query)
+                output.append({
+                    **record,
+                    "source_type": "original_text",
+                    "article": article.info(include_text=raw) if article else None,
+                    "rrf_score": scores[chunk_id],
+                })
+
+        # OCR is independently indexed. Preserve the old raw_text offsets and
+        # exact-text behavior; figure labels never masquerade as PDF text.
+        ocr_rankings = []
+        cur.execute(
+            """SELECT id FROM rag_ocr_chunks
+               WHERE position(lower(%s) in lower(content)) > 0
+               ORDER BY length(content), id LIMIT 40""", (query,),
+        )
+        ocr_rankings.append((2.0, [row["id"] for row in cur.fetchall()]))
+        cur.execute(
+            """SELECT id FROM rag_ocr_chunks
+               WHERE tsv @@ websearch_to_tsquery('romanian', %s)
+               ORDER BY ts_rank_cd(tsv, websearch_to_tsquery('romanian', %s)) DESC, id
+               LIMIT 40""", (query, query),
+        )
+        ocr_rankings.append((1.6, [row["id"] for row in cur.fetchall()]))
+        if or_query:
+            cur.execute(
+                """SELECT id FROM rag_ocr_chunks
+                   WHERE tsv @@ to_tsquery('romanian', %s)
+                   ORDER BY ts_rank_cd(tsv, to_tsquery('romanian', %s)) DESC, id
+                   LIMIT 40""", (or_query, or_query),
+            )
+            ocr_rankings.append((1.0, [row["id"] for row in cur.fetchall()]))
+        if use_vectors:
+            # Same multilingual model as normal chunks (no extra ML service).
+            query_vector = cached_embedder().embed([query], is_query=True)[0]
+            cur.execute(
+                """SELECT o.id FROM rag_ocr_chunks o
+                   JOIN rag_documents d ON d.id=o.document_id
+                   WHERE o.embedding IS NOT NULL AND d.embedding_model=%s
+                   ORDER BY o.embedding <=> %s::vector LIMIT 40""",
+                (MODEL_ID, query_vector),
+            )
+            ocr_rankings.append((1.25, [row["id"] for row in cur.fetchall()]))
+
+        ocr_scores = {}
+        for weight, ranking in ocr_rankings:
+            for position, ocr_id in enumerate(ranking, start=1):
+                ocr_scores[ocr_id] = ocr_scores.get(ocr_id, 0) + weight / (60 + position)
+        ocr_top = sorted(ocr_scores, key=lambda k: (-ocr_scores[k], k))[:limit]
+        if ocr_top:
+            cur.execute(
+                """SELECT o.id, o.document_id, d.path, o.page, o.content,
+                          o.ocr_text, o.bbox, o.confidence, o.figure_id,
+                          f.caption, f.kind AS figure_kind, f.bbox AS figure_bbox
+                   FROM rag_ocr_chunks o
+                   JOIN rag_documents d ON d.id=o.document_id
+                   JOIN rag_figures f ON f.id=o.figure_id
+                   WHERE o.id=ANY(%s)""",
+                (ocr_top,),
+            )
+            found = {r["id"]: r for r in cur.fetchall()}
+            for ocr_id in ocr_top:
+                record = found[ocr_id]
+                figure = {
+                    "figure_id": record["figure_id"],
+                    "page": record["page"],
+                    "caption": record["caption"],
+                    "kind": record["figure_kind"],
+                    "bbox": record["figure_bbox"],
+                }
+                output.append({
+                    "id": record["id"], "document_id": record["document_id"],
+                    "path": record["path"], "content": record["content"],
+                    "char_start": None, "char_end": None,
+                    "source_type": "ocr_figure",
+                    "ocr_text": record["ocr_text"],
+                    "ocr_confidence": record["confidence"],
+                    "figure": figure,
+                    "locations": [{
+                        "kind": "pdf_ocr", "page": record["page"],
+                        "figure_id": record["figure_id"], "bbox": record["bbox"],
+                    }],
+                    "article": None, "rrf_score": ocr_scores[ocr_id],
+                    "notice": "OCR is fallible; compare labels with get_page_image. "
+                              "No raw_text offsets apply to OCR content.",
+                })
+        return sorted(
+            output,
+            key=lambda item: (-item["rrf_score"],
+                              0 if item["source_type"] == "ocr_figure" else 1,
+                              item["id"]),
+        )[:limit]
 
 
 def get_text(conn, document_id: int, start: int | None = None,
