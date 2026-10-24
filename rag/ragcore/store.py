@@ -1,12 +1,14 @@
 """Standalone PostgreSQL store, incremental ingest and hybrid retrieval."""
 import hashlib
 import os
+import re
 from pathlib import Path
 
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from .articles import article_by_label, article_for_hit
 from .chunking import make_chunks, verify_coverage
 from .embeddings import MODEL_ID, Embedder, enabled
 from .parsing import SUPPORTED, parse_file
@@ -134,6 +136,7 @@ def scan(conn, folder: Path, *, use_vectors: bool = True, prune: bool = False) -
 
 
 def search(conn, query: str, *, limit: int = 8, use_vectors: bool = True) -> list[dict]:
+    """Weighted RRF: literal substring, strict Romanian FTS, forgiving OR FTS, vector."""
     init_schema(conn)
     query = query.strip()
     if not query or len(query) > 1000:
@@ -141,22 +144,40 @@ def search(conn, query: str, *, limit: int = 8, use_vectors: bool = True) -> lis
     if not 1 <= limit <= 50:
         raise ValueError("limit must be between 1 and 50")
 
-    rankings: list[list[int]] = []
+    # Strip common Romanian conversational words from the forgiving lexical
+    # branch. Keep the strict query separately for precise legal citations.
+    words = re.findall(r"[^\\W_]+(?:-[^\\W_]+)*", query.lower(), re.UNICODE)
+    stop = {
+        "care", "ce", "cum", "este", "sunt", "pentru", "despre", "din", "de", "la",
+        "cu", "și", "si", "sau", "ale", "al", "a", "în", "in", "pe", "un", "o",
+        "se", "sa", "să", "privind", "trebuie", "pot", "poate", "acest", "aceasta"
+    }
+    terms = list(dict.fromkeys(word for word in words if word not in stop and len(word) >= 2))
+    or_query = " | ".join(terms[:12])
+
+    rankings: list[tuple[float, list[int]]] = []
     with conn.cursor() as cur:
-        # Exact identifier and phrase matching (not regexp or LIKE wildcards).
         cur.execute(
-            """SELECT c.id FROM rag_chunks c
-            WHERE position(lower(%s) in lower(c.content)) > 0
-            ORDER BY length(c.content), c.id LIMIT 40""", (query,),
+            """SELECT id FROM rag_chunks
+            WHERE position(lower(%s) in lower(content)) > 0
+            ORDER BY length(content), id LIMIT 40""", (query,),
         )
-        rankings.append([row["id"] for row in cur.fetchall()])
+        rankings.append((2.0, [row["id"] for row in cur.fetchall()]))
         cur.execute(
-            """SELECT c.id FROM rag_chunks c
-            WHERE c.tsv @@ websearch_to_tsquery('romanian', %s)
-            ORDER BY ts_rank_cd(c.tsv, websearch_to_tsquery('romanian', %s)) DESC, c.id
+            """SELECT id FROM rag_chunks
+            WHERE tsv @@ websearch_to_tsquery('romanian', %s)
+            ORDER BY ts_rank_cd(tsv, websearch_to_tsquery('romanian', %s)) DESC, id
             LIMIT 40""", (query, query),
         )
-        rankings.append([row["id"] for row in cur.fetchall()])
+        rankings.append((1.6, [row["id"] for row in cur.fetchall()]))
+        if or_query:
+            cur.execute(
+                """SELECT id FROM rag_chunks
+                WHERE tsv @@ to_tsquery('romanian', %s)
+                ORDER BY ts_rank_cd(tsv, to_tsquery('romanian', %s)) DESC, id
+                LIMIT 40""", (or_query, or_query),
+            )
+            rankings.append((0.8, [row["id"] for row in cur.fetchall()]))
         if use_vectors:
             vector = Embedder().embed([query], is_query=True)[0]
             cur.execute(
@@ -166,29 +187,38 @@ def search(conn, query: str, *, limit: int = 8, use_vectors: bool = True) -> lis
                 ORDER BY c.embedding <=> %s::vector LIMIT 40""",
                 (MODEL_ID, vector),
             )
-            rankings.append([row["id"] for row in cur.fetchall()])
+            rankings.append((1.0, [row["id"] for row in cur.fetchall()]))
 
         scores: dict[int, float] = {}
-        for rank in rankings:
-            for position, chunk_id in enumerate(rank, start=1):
-                scores[chunk_id] = scores.get(chunk_id, 0) + 1 / (60 + position)
-        top = sorted(scores, key=lambda row: (-scores[row], row))[:limit]
+        for weight, ranking in rankings:
+            for position, chunk_id in enumerate(ranking, start=1):
+                scores[chunk_id] = scores.get(chunk_id, 0) + weight / (60 + position)
+        top = sorted(scores, key=lambda item: (-scores[item], item))[:limit]
         if not top:
             return []
         cur.execute(
-            """SELECT c.id, c.document_id, d.path, c.char_start, c.char_end,
-                      c.content, c.locations
+            """SELECT c.id, c.document_id, d.path, d.raw_text,
+                      c.char_start, c.char_end, c.content, c.locations
             FROM rag_chunks c JOIN rag_documents d ON d.id=c.document_id
-            WHERE c.id=ANY(%s)""",
-            (top,),
+            WHERE c.id=ANY(%s)""", (top,),
         )
         rows = {row["id"]: row for row in cur.fetchall()}
-        return [{**rows[chunk_id], "rrf_score": scores[chunk_id]}
-                for chunk_id in top]
+        output = []
+        for chunk_id in top:
+            record = rows[chunk_id]
+            raw = record.pop("raw_text")
+            article = article_for_hit(raw, record["char_start"], record["char_end"])
+            output.append({
+                **record,
+                "article": article.info(include_text=raw) if article else None,
+                "rrf_score": scores[chunk_id],
+            })
+        return output
 
 
 def get_text(conn, document_id: int, start: int | None = None,
-             end: int | None = None) -> tuple[str, str]:
+             end: int | None = None, *, article: str | None = None) -> tuple[str, str]:
+    """Return literal extracted text, optionally by legal article label."""
     init_schema(conn)
     with conn.cursor() as cur:
         cur.execute("SELECT path,raw_text FROM rag_documents WHERE id=%s", (document_id,))
@@ -196,6 +226,11 @@ def get_text(conn, document_id: int, start: int | None = None,
     if row is None:
         raise ValueError(f"Unknown document id: {document_id}")
     raw = row["raw_text"]
+    if article is not None:
+        if start is not None or end is not None:
+            raise ValueError("Choose article label or character interval, not both")
+        found = article_by_label(raw, article)
+        start, end = found.start, found.end
     a = 0 if start is None else start
     b = len(raw) if end is None else end
     if not (0 <= a <= b <= len(raw)):
