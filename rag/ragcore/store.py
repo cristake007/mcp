@@ -421,7 +421,9 @@ def list_documents(conn, *, offset: int = 0, limit: int = 50) -> dict:
                       length(d.raw_text) AS text_chars,
                       jsonb_array_length(d.warnings) AS warnings_count,
                       count(c.id) AS chunks,
-                      count(c.embedding) AS embeddings
+                      count(c.embedding) AS embeddings,
+                      (SELECT count(*) FROM rag_figures f WHERE f.document_id=d.id) AS figures,
+                      (SELECT count(*) FROM rag_ocr_chunks o WHERE o.document_id=d.id) AS ocr_chunks
                FROM rag_documents d
                LEFT JOIN rag_chunks c ON c.document_id = d.id
                GROUP BY d.id
@@ -437,6 +439,8 @@ def list_documents(conn, *, offset: int = 0, limit: int = 50) -> dict:
             "text_chars": row["text_chars"],
             "chunks": row["chunks"],
             "embeddings": row["embeddings"],
+            "figures": row["figures"],
+            "ocr_chunks": row["ocr_chunks"],
             "embedding_model": row["embedding_model"],
             "warnings_count": row["warnings_count"],
             "has_warnings": row["warnings_count"] > 0,
