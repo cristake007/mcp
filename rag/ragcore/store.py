@@ -12,6 +12,7 @@ from .articles import article_by_label, article_for_hit
 from .chunking import make_chunks, verify_coverage
 from .embeddings import MODEL_ID, Embedder, cached_embedder
 from .parsing import SUPPORTED, parse_file
+from .ocr import OCR_VERSION, enabled as ocr_enabled, extract_pdf_figures
 
 
 def connect():
@@ -82,17 +83,25 @@ def _scan_locked(conn, folder: Path, *, use_vectors: bool,
             if initial_stat.st_size > 30 * 1024 * 1024:
                 raise ValueError("File larger than 30 MB limit")
             signature = file_digest(path)
+            requested_ocr_version = (OCR_VERSION if path.suffix.lower() == ".pdf"
+                                     and ocr_enabled() else 0)
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT sha256, embedding_model FROM rag_documents WHERE path=%s",
+                    "SELECT sha256, embedding_model, ocr_version FROM rag_documents WHERE path=%s",
                     (relative,),
                 )
                 previous = cur.fetchone()
-            if previous and previous["sha256"] == signature and previous["embedding_model"] == embedding_model:
+            if (previous and previous["sha256"] == signature
+                    and previous["embedding_model"] == embedding_model
+                    and previous["ocr_version"] == requested_ocr_version):
                 numbers["unchanged"] += 1
                 continue
 
             parsed = parse_file(path)
+            figures, ocr_warnings = (
+                extract_pdf_figures(path) if requested_ocr_version else ([], [])
+            )
+            parsed.warnings.extend(ocr_warnings)
             chunks = make_chunks(parsed.raw_text, parsed.units)
             verify_coverage(parsed.raw_text, chunks)
             if chunks and use_vectors:
@@ -101,6 +110,16 @@ def _scan_locked(conn, folder: Path, *, use_vectors: bool,
                 vectors = embedder.embed([item.text for item in chunks])
             else:
                 vectors = [None] * len(chunks)
+            ocr_texts = [
+                (figure["caption"] + "\n" + figure["ocr_text"]).strip()
+                for figure in figures
+            ]
+            if use_vectors and ocr_texts:
+                if embedder is None:
+                    embedder = cached_embedder()
+                ocr_vectors = embedder.embed(ocr_texts)
+            else:
+                ocr_vectors = [None] * len(figures)
 
             # Detect writes happening while parsing or embedding. Keep the
             # previous indexed revision, and retry the next watcher cycle.
@@ -115,17 +134,21 @@ def _scan_locked(conn, folder: Path, *, use_vectors: bool,
             with conn.transaction():
                 with conn.cursor() as cur:
                     cur.execute(
-                        """INSERT INTO rag_documents (path, sha256, parser, raw_text, warnings, embedding_model)
-                        VALUES (%s,%s,%s,%s,%s,%s)
+                        """INSERT INTO rag_documents
+                        (path, sha256, parser, raw_text, warnings, embedding_model, ocr_version)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (path) DO UPDATE SET
                           sha256=EXCLUDED.sha256, parser=EXCLUDED.parser,
                           raw_text=EXCLUDED.raw_text, warnings=EXCLUDED.warnings,
-                          embedding_model=EXCLUDED.embedding_model, indexed_at=now()
+                          embedding_model=EXCLUDED.embedding_model,
+                          ocr_version=EXCLUDED.ocr_version, indexed_at=now()
                         RETURNING id""",
                         (relative, signature, parsed.parser, parsed.raw_text,
-                         Jsonb(parsed.warnings), embedding_model),
+                         Jsonb(parsed.warnings), embedding_model, requested_ocr_version),
                     )
                     doc_id = cur.fetchone()["id"]
+                    # Replacing a document revision is atomic for text AND OCR.
+                    cur.execute("DELETE FROM rag_figures WHERE document_id=%s", (doc_id,))
                     cur.execute("DELETE FROM rag_chunks WHERE document_id=%s", (doc_id,))
                     for ordinal, (chunk, vector) in enumerate(zip(chunks, vectors, strict=True)):
                         cur.execute(
@@ -135,10 +158,33 @@ def _scan_locked(conn, folder: Path, *, use_vectors: bool,
                             (doc_id, ordinal, chunk.start, chunk.end, chunk.text,
                              Jsonb(chunk.locations), vector),
                         )
+                    for figure, ocr_content, vector in zip(
+                        figures, ocr_texts, ocr_vectors, strict=True
+                    ):
+                        cur.execute(
+                            """INSERT INTO rag_figures
+                               (document_id, page, ordinal, kind, bbox, caption)
+                               VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
+                            (doc_id, figure["page"], figure["ordinal"],
+                             figure["kind"], Jsonb(figure["bbox"]), figure["caption"]),
+                        )
+                        figure_id = cur.fetchone()["id"]
+                        if ocr_content:
+                            cur.execute(
+                                """INSERT INTO rag_ocr_chunks
+                                   (document_id, figure_id, page, content, ocr_text,
+                                    bbox, confidence, embedding)
+                                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s::vector)""",
+                                (doc_id, figure_id, figure["page"], ocr_content,
+                                 figure["ocr_text"], Jsonb(figure["ocr_bbox"]),
+                                 figure["ocr_confidence"], vector),
+                            )
             numbers["updated"] += 1
             if not chunks:
                 numbers["empty"] += 1
-            print(f"INDEXED {relative}: {len(chunks)} chunks; warnings={len(parsed.warnings)}", flush=True)
+            print(f"INDEXED {relative}: {len(chunks)} text chunks; "
+                  f"figures={len(figures)}, ocr_chunks={len(ocr_texts)}; "
+                  f"warnings={len(parsed.warnings)}", flush=True)
             for warning in parsed.warnings:
                 print(f"  WARNING {relative}: {warning}", flush=True)
         except Exception as exc:
