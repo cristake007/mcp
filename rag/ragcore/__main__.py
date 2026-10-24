@@ -28,6 +28,8 @@ def parser():
     stats.add_argument("term", help="Literal word or phrase to count")
     stats.add_argument("--second-term", default=None, help="Second term for co-occurrence")
     stats.add_argument("--mode", choices=("all", "any"), default="all")
+    stats.add_argument("--match", choices=("linguistic", "exact"), default="linguistic",
+                       help="Romanian word forms (default) or literal only")
     stats.add_argument("--examples-limit", type=int, default=10)
     sub.add_parser("verify", help="Verify stored chunk content and coverage")
     sub.add_parser("status", help="Show document/chunk counts")
@@ -65,6 +67,7 @@ def main():
                 result = corpus_stats(
                     conn, args.term, args.second_term,
                     mode=args.mode, examples_limit=args.examples_limit,
+                    match_type=args.match,
                 )
                 print(json.dumps(result, ensure_ascii=False, indent=2))
             elif args.action == "get-text":
