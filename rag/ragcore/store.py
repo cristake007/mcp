@@ -97,7 +97,7 @@ def _scan_locked(conn, folder: Path, *, use_vectors: bool,
             verify_coverage(parsed.raw_text, chunks)
             if chunks and use_vectors:
                 if embedder is None:
-                    embedder = Embedder()
+                    embedder = cached_embedder()
                 vectors = embedder.embed([item.text for item in chunks])
             else:
                 vectors = [None] * len(chunks)
