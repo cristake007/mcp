@@ -16,13 +16,14 @@ async def main() -> None:
     assert "ui/initialize" in html and "ui/notifications/tool-result" in html
     assert "get_rag_page_data" in html and "data:image/jpeg;base64," in html
     assert "<iframe" not in html.lower() and "fetch(" not in html.lower()
+    assert "togglePage" in html and "figure_id" in html
     assert "document.createElement" in html
     assert "textContent" in html and "innerHTML" not in html
 
     sample = [
         {"document_id": 8, "path": "manual/MANTIS.pdf",
          "source_type": "ocr_figure", "content": "Ethernet connector",
-         "figure": {"page": 12, "caption": "Figure 4 MANTIS connectors"},
+         "figure": {"figure_id": 12, "page": 12, "caption": "Figure 4 MANTIS connectors"},
          "ocr_confidence": 87.3, "locations": [{"kind": "pdf_ocr", "page": 12}]},
         {"document_id": 8, "path": "manual/MANTIS.pdf",
          "source_type": "original_text", "content": "Ethernet cable",
@@ -35,6 +36,10 @@ async def main() -> None:
     assert len(selected["sources"]) == 3
     assert len(selected["pages"]) == 2
     assert selected["pages"][0]["caption"] == "Figure 4 MANTIS connectors"
+    assert selected["pages"][0]["figure_id"] == 12
+    assert selected["pages"][0]["source_type"] == "ocr_figure"
+    # An unrelated text hit cannot replace the figure preview.
+    assert selected["pages"][1]["figure_id"] is None
 
     jpeg = bytes.fromhex("ffd8ffd9")
     encoded = base64.b64encode(jpeg).decode()
@@ -47,8 +52,12 @@ async def main() -> None:
             assert payload == {"document_id": 8}
             return {"document_id": 8, "path": "manual/MANTIS.pdf"}
         if path == "/page-image":
-            assert payload == {"document_id": 8, "page": 12}
+            assert payload in ({"document_id": 8, "page": 12},
+                               {"document_id": 8, "page": 12, "figure_id": 12})
             return {"document_id": 8, "path": "manual/MANTIS.pdf", "page": 12,
+                    "figure_id": payload.get("figure_id"),
+                    "image_kind": "cropped_original_pdf_figure" if payload.get("figure_id") else "rendered_original_pdf_page",
+                    "figure_caption": "Figure 4 MANTIS connectors" if payload.get("figure_id") else None,
                     "total_pages": 186, "mime_type": "image/jpeg",
                     "source_sha256": "0"*64, "source_verified": True,
                     "image_base64": encoded}
@@ -70,18 +79,26 @@ async def main() -> None:
 
     plain = await tools["show_rag_sources"].run({"query": "MANTIS conectori"})
     assert plain.structured_content["pages"][0]["page"] == 12, plain
+    assert plain.structured_content["pages"][0]["figure_id"] == 12, plain
     assert plain.structured_content["source_policy"] == "local_rag_only"
     assert not any("image_base64" in p for p in plain.structured_content["pages"])
 
     direct = await tools["show_rag_sources"].run(
-        {"document_id": 8, "page": 12},
+        {"document_id": 8, "page": 12, "figure_id": 12},
     )
     assert direct.structured_content["pages"][0]["page"] == 12
+    assert direct.structured_content["pages"][0]["figure_id"] == 12
 
     picture = await tools["get_rag_page_data"].run({"document_id": 8, "page": 12})
     assert picture.structured_content["source_verified"]
     assert picture.structured_content["image_base64"] == encoded
     assert picture.structured_content["total_pages"] == 186
+    figure = await tools["get_rag_page_data"].run(
+        {"document_id": 8, "page": 12, "figure_id": 12},
+    )
+    assert figure.structured_content["figure_id"] == 12
+    assert figure.structured_content["image_kind"] == "cropped_original_pdf_figure"
+    assert figure.structured_content["source_verified"]
 
     for invalid in [{"document_id": -1, "page": 1}, {"page": 1}]:
         try:
