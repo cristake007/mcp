@@ -202,6 +202,39 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                         headers=headers,
                     )
                     self.assertEqual(bad_range.status_code, 400)
+                    listing = await client.post(
+                        "/documents", json={"offset": 0, "limit": 10}, headers=headers,
+                    )
+                    self.assertEqual(listing.status_code, 200, listing.text)
+                    docs = listing.json()
+                    self.assertEqual(docs["total_documents"], 1)
+                    self.assertEqual(docs["documents"][0]["document_id"], item["document_id"])
+                    self.assertEqual(docs["documents"][0]["warnings_count"], 0)
+                    self.assertEqual(docs["source_check"], "not_performed")
+                    self.assertIsNone(docs["next_offset"])
+                    status = await client.post(
+                        "/document-status", json={"document_id": item["document_id"]},
+                        headers=headers,
+                    )
+                    self.assertEqual(status.status_code, 200, status.text)
+                    self.assertEqual(status.json()["status"], "indexed_complete")
+                    self.assertTrue(status.json()["stored_text_coverage_complete"])
+                    self.assertGreater(status.json()["chunks"], 0)
+                    self.assertEqual(status.json()["source_check"], "not_performed")
+                    denied_list = await client.post("/documents", json={})
+                    self.assertEqual(denied_list.status_code, 401)
+                    invalid_list = await client.post(
+                        "/documents", json={"offset": False}, headers=headers,
+                    )
+                    self.assertEqual(invalid_list.status_code, 400)
+                    invalid_status = await client.post(
+                        "/document-status", json={"document_id": 0}, headers=headers,
+                    )
+                    self.assertEqual(invalid_status.status_code, 400)
+                    missing = await client.post(
+                        "/document-status", json={"document_id": 9999999}, headers=headers,
+                    )
+                    self.assertEqual(missing.status_code, 400)
             finally:
                 if prior is None:
                     os.environ.pop("RAG_API_TOKEN", None)
@@ -248,6 +281,34 @@ class StoreTests(unittest.TestCase):
                 self.assertEqual(literal, row["content"])
                 self.assertEqual(store.verify_index(conn)["content_mismatches"], 0)
                 self.assertEqual(store.verify_index(conn)["coverage_errors"], [])
+                listing = store.list_documents(conn, offset=0, limit=1)
+                self.assertEqual(listing["total_documents"], 2)
+                self.assertEqual(len(listing["documents"]), 1)
+                self.assertEqual(listing["next_offset"], 1)
+                self.assertEqual(store.list_documents(conn, offset=1, limit=1)["next_offset"], None)
+                status = store.document_status(conn, row["document_id"])
+                self.assertEqual(status["status"], "indexed_complete")
+                self.assertFalse(status["integrity_errors"])
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE rag_chunks SET content='corrupted' "
+                        "WHERE document_id=%s AND ordinal=0",
+                        (row["document_id"],),
+                    )
+                broken = store.document_status(conn, row["document_id"])
+                self.assertEqual(broken["status"], "incomplete")
+                self.assertFalse(broken["stored_text_coverage_complete"])
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE rag_chunks SET content=substring(d.raw_text "
+                        "FROM rag_chunks.char_start+1 FOR rag_chunks.char_end-rag_chunks.char_start) "
+                        "FROM rag_documents d WHERE rag_chunks.document_id=d.id "
+                        "AND rag_chunks.document_id=%s AND rag_chunks.ordinal=0",
+                        (row["document_id"],),
+                    )
+                self.assertEqual(
+                    store.document_status(conn, row["document_id"])["status"], "indexed_complete",
+                )
 
                 source.write_text("Articolul 15: 25 de ani!\nISO 9001", encoding="utf-8")
                 changed = store.scan(conn, folder, use_vectors=False)
