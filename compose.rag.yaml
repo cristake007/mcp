@@ -1,0 +1,15 @@
+# Opt-in MCP integration ONLY. Never part of normal 'docker compose up'.
+services:
+  mcp:
+    environment:
+      MCP_RAG_ENABLED: "1"
+      MCP_RAG_URL: http://rag-api:8080
+      MCP_RAG_API_TOKEN: ${RAG_API_TOKEN:?Supply RAG_API_TOKEN from rag/.env}
+    networks:
+      - internal
+      - mcp_rag_link
+
+networks:
+  mcp_rag_link:
+    external: true
+    name: mcp-rag-link
