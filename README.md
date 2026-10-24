@@ -165,6 +165,14 @@ Examples:
 {"offset":0,"limit":50}
 ```
 
+Illustrated PDF manuals can now return source-page images through
+`get_page_image(document_id, page)`. Take the document ID and exact PDF page
+from `search_docs` results (`locations[].page`): the MCP response includes
+the verified original source path/page and a native `image/jpeg` block.
+The original PDF must still match its indexed SHA-256; no image recognition,
+OCR, or external image provider is involved. Whether the image is displayed
+inline depends on the MCP client. See `rag/README.md` for details.
+
 Pass that to `list_docs`; use a returned `document_id` with
 `document_status`:
 
