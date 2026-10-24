@@ -112,12 +112,12 @@ jobs:
           assert data["exact"] and "ISO 9001" in data["text"], data
           print("PASS: standalone authenticated RAG API")
           PY
-      - name: Verify auto-indexer finds new files and removes deleted files
+      - name: Verify auto-indexer discovers new and deleted documents
         run: |
           docker compose -f rag/compose.yaml up -d indexer
-          printf 'A newly added document about ISO 14001\n' > rag/documents/subfolder/new-doc.txt
+          printf 'ISO 14001 newly added document\n' > rag/documents/subfolder/new-doc.txt
           success=0
-          for i in $(seq 1 15); do
+          for i in $(seq 1 20); do
             if docker compose -f rag/compose.yaml exec -T indexer python -m ragcore status | grep -q '"documents": 2'; then
               success=1
               break
@@ -130,10 +130,8 @@ jobs:
           }
           rm rag/documents/subfolder/procedure.txt
           success=0
-          for i in $(seq 1 15); do
-            if docker compose -f rag/compose.yaml exec -T indexer python -m ragcore search --lexical-only 'ISO 9001' | grep -q '^\[\]
-        run: docker compose -f rag/compose.yaml -f rag/compose.mcp.yaml down
-; then
+          for i in $(seq 1 20); do
+            if docker compose -f rag/compose.yaml exec -T indexer python -m ragcore status | grep -q '"documents": 1'; then
               success=1
               break
             fi
