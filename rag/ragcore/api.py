@@ -64,6 +64,27 @@ async def process(request: Request):
             return JSONResponse(value, headers={"Cache-Control": "no-store"})
 
         with store.connect() as conn:
+            if request.url.path == "/documents":
+                offset = params.get("offset", 0)
+                limit = params.get("limit", 50)
+                if type(offset) is not int or not 0 <= offset <= 100000:
+                    raise ValueError("Invalid offset")
+                if type(limit) is not int or not 1 <= limit <= 100:
+                    raise ValueError("Invalid limit")
+                return JSONResponse(
+                    store.list_documents(conn, offset=offset, limit=limit),
+                    headers={"Cache-Control": "no-store"},
+                )
+
+            if request.url.path == "/document-status":
+                document_id = params.get("document_id")
+                if type(document_id) is not int or document_id <= 0:
+                    raise ValueError("Invalid document ID")
+                return JSONResponse(
+                    store.document_status(conn, document_id),
+                    headers={"Cache-Control": "no-store"},
+                )
+
             if request.url.path == "/search":
                 query = params.get("query")
                 limit = params.get("limit", 6)
@@ -110,6 +131,8 @@ app = Starlette(routes=[
     Route("/search", process, methods=["POST"]),
     Route("/text", process, methods=["POST"]),
     Route("/stats", process, methods=["POST"]),
+    Route("/documents", process, methods=["POST"]),
+    Route("/document-status", process, methods=["POST"]),
 ])
 
 
