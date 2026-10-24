@@ -13,7 +13,7 @@ async def main():
     enabled = os.getenv("MCP_RAG_ENABLED") == "1"
     expected = {"ping", "whoami", "inspect_site"}
     if enabled:
-        expected |= {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status"}
+        expected |= {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status", "corpus_health"}
     expected -= disabled
     assert tools == expected, (tools, expected)
 
@@ -24,7 +24,7 @@ async def main():
     isolated = FastMCP("optional-tools-test")
     register_rag_tools(isolated)
     custom = {tool.name: tool for tool in await isolated.list_tools()}
-    assert set(custom) == {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status"} - disabled
+    assert set(custom) == {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status", "corpus_health"} - disabled
     expected = "Art. 15\n  Verificare anuală.\n"
     if "corpus_stats" in custom:
         stats_result = {
@@ -63,6 +63,19 @@ async def main():
             result = await custom["document_status"].run({"document_id": 14})
             assert result.structured_content == record, result
             request.assert_called_once_with("/document-status", {"document_id": 14})
+
+    if "corpus_health" in custom:
+        health = {
+            "status": "attention_required",
+            "summary": {"new_files": 1, "modified_files": 0, "missing_files": 0,
+                        "unindexed_files": 1},
+            "files": [{"path": "new.pdf", "status": "new_unindexed"}],
+            "next_offset": None, "source_directory_checked": True,
+        }
+        with patch("app.rag_tools._request", return_value=health) as request:
+            result = await custom["corpus_health"].run({"offset": 0, "limit": 20})
+            assert result.structured_content == health, result
+            request.assert_called_once_with("/corpus-health", {"offset": 0, "limit": 20})
 
     if "get_text" not in custom:
         return
