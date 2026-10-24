@@ -160,7 +160,8 @@ def _clean_html(raw: str) -> str:
     soup = BeautifulSoup(raw, "html.parser")
     for element in soup.select(REMOVE_HTML):
         element.decompose()
-    return (soup.body or soup).prettify()
+    # Do not prettify: inserted indentation/newlines can split inline words.
+    return str(soup.body or soup)
 
 
 def _slug(url: str) -> str:
