@@ -13,6 +13,15 @@ No public registration, no GitHub/Google login, no ContextForge.
 - Nginx HTTPS reverse proxy on the existing host, **not** a third container
 - Two example tools: `ping` and `whoami`
 
+## Control Bash (mcpctl)
+
+Pentru administrare, foloseste `bash mcpctl help`. Comenzi disponibile:
+`user add/enable/disable/list`, `tools list/enable/disable`,
+`rag enable/disable/start/stop/scan/verify/search`, `mcp start/stop/apply/logs`,
+`status`. Parolele utilizatorilor se introduc interactiv. Activarea tool-urilor
+este globala pentru toti utilizatorii. RAG este separat si optional: `rag disable`
+nu sterge documentele sau baza RAG. Configurarea necesita Docker Compose v2.
+
 ## 1. Configure
 
 Use a Linux host with Docker Compose and an existing HTTPS Nginx virtual host.
