@@ -28,6 +28,13 @@ provider = DatabaseOAuthProvider(base_url=BASE_URL)
 mcp = FastMCP(name="TUV Private MCP", auth=provider)
 
 
+# RAG tools are absent unless explicitly activated via compose.rag.yaml.
+# No RAG imports occur in normal MCP mode, even if RAG is installed.
+if os.environ.get("MCP_RAG_ENABLED", "0") == "1":
+    from app.rag_tools import register_rag_tools
+    register_rag_tools(mcp)
+
+
 @mcp.tool()
 def ping() -> str:
     """Check that the authenticated MCP connection works."""
