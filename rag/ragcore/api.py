@@ -121,6 +121,14 @@ async def process(request: Request):
                     headers={"Cache-Control": "no-store"},
                 )
 
+            if request.url.path == "/figures":
+                document_id = params.get("document_id")
+                page = params.get("page")
+                return JSONResponse(
+                    {"figures": store.list_figures(conn, document_id, page)},
+                    headers={"Cache-Control": "no-store"},
+                )
+
             if request.url.path == "/document-status":
                 document_id = params.get("document_id")
                 if type(document_id) is not int or document_id <= 0:
@@ -179,6 +187,7 @@ app = Starlette(routes=[
     Route("/documents", process, methods=["POST"]),
     Route("/document-status", process, methods=["POST"]),
     Route("/page-image", process, methods=["POST"]),
+    Route("/figures", process, methods=["POST"]),
     Route("/corpus-health", process, methods=["POST"]),
 ])
 
