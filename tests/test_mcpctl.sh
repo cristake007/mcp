@@ -64,6 +64,8 @@ ctl tools list | grep -q 'get_text.*unavailable'
 ctl tools list | grep -q 'corpus_stats.*unavailable'
 grep -qx 'POSTGRES_PASSWORD=CI_SECRET' "$TMP/.env"
 grep -qx 'RAG_DB_PASSWORD=CI_RAG_PASSWORD' "$TMP/rag/.env"
+ctl rag stats autorizare --second-term suspendare --mode all
+grep -q 'run --rm cli stats autorizare --second-term suspendare --mode all' "$TMP/docker.log"
 ctl rag scan --lexical-only
 grep -q 'run --rm cli scan --lexical-only' "$TMP/docker.log"
 
