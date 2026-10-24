@@ -523,12 +523,17 @@ def inspect_site(
     audit_ack: explicitly acknowledge a verified batch (url + sha256), or
       one url + expected_hash, for the requested fields. Baselines persist in
       PostgreSQL; no read, get, batch_get or audit_changes marks content reviewed.
+    audit_report: paginated sitemap coverage from explicit confirmations only;
+      does not re-fetch pages or assert that their content is still current.
+    Each batch_get/audit_changes response includes per-batch coverage_report
+      with missing fields, warnings, failed URLs, unfinished text parts.
     Diacritics and grammar must be interpreted by the LLM, not this tool.
     """
     if action not in ("sitemaps", "urls", "get", "batch_get", "search",
-                      "search_many", "verify_quote", "audit_changes", "audit_ack"):
+                      "search_many", "verify_quote", "audit_changes", "audit_ack",
+                      "audit_report"):
         raise ValueError("Acțiune invalidă: sitemaps, urls, get, batch_get, "
-                         "search, search_many, verify_quote, audit_changes, audit_ack")
+                         "search, search_many, verify_quote, audit_changes, audit_ack, audit_report")
     if not 0 <= offset <= 100000:
         raise ValueError("offset trebuie să fie între 0 și 100000")
     if not 1 <= limit <= 100:
@@ -617,6 +622,22 @@ def inspect_site(
 
     if action == "sitemaps":
         return {"action": action, "sitemaps": _sitemaps()}
+
+    if action == "audit_report":
+        if not sitemap or sitemap == "all":
+            raise ValueError("audit_report necesită un singur sitemap explicit")
+        from app.site_audit import review_coverage
+        selected = _sitemap_url(sitemap, _sitemaps())
+        urls = _urls(selected)
+        eligible, skipped = _index_pages_in_sitemap(selected, urls)
+        report = review_coverage(eligible, selectors, offset, limit)
+        return {
+            "action": action, "sitemap": selected, "total_urls": len(urls),
+            "skipped_index_urls": skipped,
+            "fields": list(selectors) if selectors is not None else None,
+            "coverage": "selected" if selectors is not None else "all",
+            **report,
+        }
 
     if action == "urls":
         selected = _sitemap_url(sitemap, _sitemaps())
@@ -709,6 +730,8 @@ def inspect_site(
             {"url": p["url"], "retrieve_remaining": p["retrieve_remaining"]}
             for p in pages if p["next_part"] is not None
         ]
+        from app.site_audit import batch_coverage
+        coverage_report = batch_coverage(pages, unchanged, errors, len(current))
         return {
             "action": action, "sitemap": selected, "total_urls": len(urls),
             "auditable_urls": len(eligible_urls),
@@ -718,10 +741,12 @@ def inspect_site(
             "offset": offset, "requested_limit": limit,
             "processed": len(current), "pages": pages, "unchanged": unchanged,
             "errors": errors,
+            "coverage_report": coverage_report,
             "next_offset": next_offset if next_offset < len(eligible_urls) else None,
             "end_of_sitemap": next_offset >= len(eligible_urls),
             "batch_complete": not errors and not pending
-                              and all(not p["warnings"] for p in pages),
+                              and all(not p["warnings"] and not p["missing_fields"]
+                                      for p in pages),
             "pending_parts": pending,
             "note": (
                 "end_of_sitemap describes URL pagination only. "
