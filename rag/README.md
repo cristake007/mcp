@@ -24,7 +24,8 @@ Store documents beneath `rag/documents/`, with any directory depth:
 rag/documents/
 ├── certificari/
 │   ├── iso9001.pdf
-│   └── standard.docx
+│   ├── standard.docx
+│   └── instruire.pptx
 └── proceduri/
     ├── reguli.xlsx
     └── subdirector/
@@ -75,13 +76,17 @@ produce a nonzero CLI exit code.
   Every stored chunk corresponds exactly to a zero-based interval in that
   extracted text. `verify` checks content equality and full character
   coverage for every document.
-- Each extracted PDF page, DOCX paragraph/table cell, and XLSX cell stores
-  provenance; sources are returned with search results.
+- Each extracted PDF page, DOCX paragraph/table cell, PPTX slide/text shape/
+  table cell/presenter note, and XLSX cell stores provenance; sources are
+  returned with search results.
 - Extraction is **not** a byte-for-byte reconstruction of the original:
   PDFs may have reading-order issues; image-only PDFs need OCR and are
   explicitly flagged. Embedded shapes, footnotes and tracked DOCX changes
-  may require manual inspection. XLSX formulas are stored as formulas,
-  **not evaluated values**. Original source files remain untouched.
+  may require manual inspection. PPTX slide text, tables and presenter notes
+  are supported; reading order follows shape/XML order and may differ from
+  visual reading order. Images, charts, SmartArt and embedded objects are
+  not fully parsed and are flagged where detected. XLSX formulas are stored
+  as formulas, **not evaluated values**. Original files remain untouched.
 - Embeddings are for retrieval only. Exact quotes always come from stored
   extracted text, not from an LLM. Full-text uses PostgreSQL Romanian
   stemming, phrase substring matching and vector cosine similarity merged
