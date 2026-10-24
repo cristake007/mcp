@@ -50,7 +50,24 @@ def file_digest(path: Path) -> str:
         return hashlib.file_digest(file, "sha256").hexdigest()
 
 
-def scan(conn, folder: Path, *, use_vectors: bool = True, prune: bool = False) -> dict:
+def scan(conn, folder: Path, *, use_vectors: bool = True,
+         prune: bool = False, only_paths: set[str] | None = None) -> dict:
+    """Serialize all manual and automatic RAG scans with a PostgreSQL advisory lock."""
+    init_schema(conn)
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(8460153001) AS acquired")
+        if not cur.fetchone()["acquired"]:
+            raise RuntimeError("Another RAG indexing process is running; retry later")
+    try:
+        return _scan_locked(conn, folder, use_vectors=use_vectors,
+                            prune=prune, only_paths=only_paths)
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(8460153001)")
+
+
+def _scan_locked(conn, folder: Path, *, use_vectors: bool,
+                 prune: bool, only_paths: set[str] | None) -> dict:
     init_schema(conn)
     candidates = list(walk_documents(folder))
     seen = {name for name, _ in candidates}
@@ -58,8 +75,11 @@ def scan(conn, folder: Path, *, use_vectors: bool = True, prune: bool = False) -
     embedder = None
     numbers = {"updated": 0, "unchanged": 0, "errors": 0, "deleted": 0, "empty": 0}
     for relative, path in candidates:
+        if only_paths is not None and relative not in only_paths:
+            continue
         try:
-            if path.stat().st_size > 30 * 1024 * 1024:
+            initial_stat = path.stat()
+            if initial_stat.st_size > 30 * 1024 * 1024:
                 raise ValueError("File larger than 30 MB limit")
             signature = file_digest(path)
             with conn.cursor() as cur:
@@ -81,6 +101,14 @@ def scan(conn, folder: Path, *, use_vectors: bool = True, prune: bool = False) -
                 vectors = embedder.embed([item.text for item in chunks])
             else:
                 vectors = [None] * len(chunks)
+
+            # Detect writes happening while parsing or embedding. Keep the
+            # previous indexed revision, and retry the next watcher cycle.
+            final_stat = path.stat()
+            if ((initial_stat.st_size, initial_stat.st_mtime_ns) !=
+                    (final_stat.st_size, final_stat.st_mtime_ns) or
+                    file_digest(path) != signature):
+                raise RuntimeError("File changed while indexing; retry when stable")
 
             # One transaction per file: parser/model/DB errors leave its previous
             # indexed version intact. The original document is read-only.
