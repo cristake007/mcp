@@ -78,6 +78,7 @@ jobs:
           docker compose -f rag/compose.yaml run --rm cli verify
           docker compose -f rag/compose.yaml run --rm cli status
           docker compose -f rag/compose.yaml run --rm cli search --lexical-only 'ISO 9001' | grep -F subfolder/procedure.txt
+          docker compose -f rag/compose.yaml run --rm cli stats 'ISO 9001' --examples-limit 0 | grep -F '"matching_documents": 1'
       - name: Exercise token-protected optional RAG API over Docker network
         run: |
           docker network create mcp-rag-link
@@ -110,6 +111,11 @@ jobs:
           item = results[0]
           data = call("/text", {"document_id": item["document_id"]}, token)
           assert data["exact"] and "ISO 9001" in data["text"], data
+          stats = call("/stats", {"term": "ISO 9001", "examples_limit": 0}, token)
+          assert stats["documents_scanned"] == 1, stats
+          assert stats["matching_documents"] == 1, stats
+          assert stats["exhaustive_counts"], stats
+          assert stats["document_examples"] == [], stats
           print("PASS: standalone authenticated RAG API")
           PY
       - name: Verify auto-indexer discovers new and deleted documents
