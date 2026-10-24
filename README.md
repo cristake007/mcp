@@ -54,7 +54,15 @@ Only the exact HTTPS host `tuvkarpat.ro` is accepted. Redirects to other
 destinations are not followed. Remote fetching has time and size limits.
 Sitemap XML is cached in memory for 5 minutes, while page content is read live.
 `batch_get` supports a single sitemap at a time, accepts `offset` and
-`limit` (max 5 pages), and uses at most three concurrent requests. Each
+`limit` (max 5 pages), and uses at most three concurrent requests.
+It automatically excludes archive landing pages that match the sitemap
+name (for example `/cursuri/` in `cursuri-sitemap.xml`): they do not
+consume a batch slot or cause needless HTML fetches. The response includes
+`total_urls` (raw sitemap count), `auditable_urls` (individual entries),
+and `skipped_index_urls` (excluded archives). `offset`/`next_offset` are
+positions among **auditable entries**. For an old saved audit cursor created
+before this fix, restart at offset 0; cursors from different versions are
+not interchangeable. The `urls` and `get` actions remain unchanged. Each
 returned page has `content`, `total_chars`, `sha256`, `total_parts`,
 `next_part` and any `warnings`. The default maximum content per page
 is 12000 characters; there is **no silent truncation**. If `pending_parts`
