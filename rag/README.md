@@ -209,6 +209,38 @@ stored text by document ID with optional `start`/`end` or `article`
 (e.g. `"Art. 34"`). Ambiguous/repeated article numbers require offsets.
 HTTP text output is limited to 25,000 characters per call.
 
+### Automatic PDF orientation correction (no file changes)
+
+You can drop the **original rotated PDF** directly into \`rag/documents/\`.
+The RAG indexer automatically determines a correction for each page before
+extracting native text and running Tesseract OCR. It first examines the
+dominant native text direction from PDF glyph matrices (handles 90°, 180°,
+and 270° rotations even when the PDF metadata incorrectly says 0°).
+Pages with little/no native text optionally use Tesseract OSD, but a low-
+confidence OSD guess is ignored rather than rotating blindly.
+
+The corrected PDF exists **only as a temporary file** during indexing.
+Neither original bytes nor the user's source PDF are modified. PostgreSQL
+records the applied page rotations under \`rag_documents.page_rotations\`,
+and \`get_page_image\` uses the same metadata to display an upright page
+from the unchanged original source. Page numbering stays unchanged.
+\`document_status\` reports exact page angles and \`list_docs\` reports the
+number of rotated pages. Orientation-related schema changes are additive
+and retain the existing document IDs and previous index.
+
+Optional setting in \`rag/.env\`:
+
+\`\`\`dotenv
+RAG_AUTO_ROTATE_ENABLED=1
+\`\`\`
+
+Existing PDFs get **one automatic reindex** after deployment because the
+orientation algorithm version is new. Subsequent scans skip unchanged
+documents. For mixed-layout PDFs or pages containing only a few characters
+the orientation may remain unresolved; the engine does not guess a
+rotation without sufficient evidence. No file renaming, manual conversion,
+extra service, or new permanent file is required.
+
 ### Figure-aware OCR with local Tesseract (general PDF indexing)
 
 The independent indexer now extracts **image-region text** from illustrated
