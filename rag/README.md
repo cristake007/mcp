@@ -209,6 +209,58 @@ stored text by document ID with optional `start`/`end` or `article`
 (e.g. `"Art. 34"`). Ambiguous/repeated article numbers require offsets.
 HTTP text output is limited to 25,000 characters per call.
 
+### Figure-aware OCR with local Tesseract (general PDF indexing)
+
+The independent indexer now extracts **image-region text** from illustrated
+PDF documents with Tesseract 5 (CPU-only, 1 OCR thread). It works on any PDF,
+not on a predefined MANTIS/CAPTURE document template:
+
+1. `pdfplumber` extracts the original text exactly as before, retaining its
+   character offsets and page citations.
+2. The OCR worker detects embedded image regions, associates the closest
+   nearby native "Figure 4: ..." / "Figura 4: ..." caption by page geometry,
+   and reads labels inside those regions with local Tesseract TSV OCR.
+   A page without native text is OCR-scanned as a page-level fallback.
+3. PostgreSQL stores `rag_figures` (page, region, caption) and
+   `rag_ocr_chunks` (recognized labels, OCR confidence, geometry, figure ID,
+   optional multilingual vector). No image binaries are stored in the DB.
+4. `search_docs` searches text chunks **and** figure OCR results. OCR hits
+   have `source_type="ocr_figure"`, `ocr_text`, `ocr_confidence`,
+   `figure.caption`, `figure.page` and `locations[].page`. They intentionally
+   have **no** `char_start`/`char_end`, since OCR is not the literal PDF
+   text. Call `get_page_image(document_id, page)` to include the original
+   visual page alongside the factual answer.
+5. OCR and native text remain distinct, preserving `verify_index` and
+   legal literal quoting via `get_text`. Incorrect OCR is never treated as
+   guaranteed verbatim source text.
+
+The OCR engine is included in the existing RAG Docker image
+(`tesseract-ocr`, English/Romanian packs); no additional container, GPU,
+cloud model, web API, or per-document hard-coded layout rules are needed.
+The indexer uses `OMP_THREAD_LIMIT=1` when running OCR; images are rendered
+and discarded during indexing. Figure association is *best effort* based
+on geometry and captions, not perfect document understanding. Vector-only
+illustrations, text inside tiny icons, heavily stylized fonts, or very dense
+pages can still be missed or misread. Scanned PDFs without native text are
+processed using a whole-page fallback. Only the first 12 larger image regions
+per page are OCR-processed; exceeding this produces an index warning.
+
+Optional env vars in `rag/.env` (the defaults work):
+
+```dotenv
+RAG_OCR_ENABLED=1
+RAG_OCR_LANG=eng
+```
+
+For Romanian pages, change the language to `eng+ron`. Existing PDFs are
+automatically reindexed once because the indexed `ocr_version` is upgraded,
+even when source SHA-256 is unchanged. Subsequent scans of unchanged files
+skip OCR. To check ingestion, use `list_docs` (new `figures` and
+`ocr_chunks` counts), `document_status`, and `corpus_health`.
+The first OCR pass over a large illustrated manual can use CPU for several
+minutes; the indexer remains single-process and non-destructive. The API
+never runs OCR per user question.
+
 ### Images from indexed PDF manuals: `get_page_image`
 
 PDF search results from `search_docs` already include source `locations`
@@ -233,9 +285,9 @@ image URL is used.
 Rendered JPEG output is limited to at most 1050 x 1500 pixels and 850 KiB,
 so it can travel through the private MCP bridge. Source page images are
 visually faithful *renderings*, not lossless PNGs of the original images.
-The tool **does not perform visual semantic indexing**: `search_docs`
-finds text and page references; screenshots without extractable text are not
-automatically searchable by their visual content. If a page includes multiple
+The page-image tool itself does no OCR. The **indexer** now extracts OCR
+labels from embedded image regions and makes them searchable by `search_docs`.
+This does not equal full visual understanding of photographs or diagrams. If a page includes multiple
 figures, the tool returns the full page rather than choosing a figure.
 
 Native MCP image blocks are supported by the protocol and FastMCP, but their
