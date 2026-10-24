@@ -8,12 +8,31 @@ from pathlib import Path
 # Run with python -m unittest discover -s rag/tests -v from repository root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from ragcore.articles import articles, article_by_label, article_for_hit
 from ragcore.chunking import Chunk, make_chunks, verify_coverage
 from ragcore.parsing import Parsed, parse_file
 from ragcore.store import walk_documents
 
 
 class ParserTests(unittest.TestCase):
+    def test_articles_span_across_pages_and_preserve_exact_text(self):
+        raw = ("INTRO\nArt. 33 (1) Verificarea se face anual.\n"
+               "(2) Evaluarea este practica.\n"
+               "15\nMONITORUL OFICIAL\n"
+               "Art. 34 (1) Inspectorul completeaza raportul.\n"
+               "(2) Documentele se arhiveaza.\nArt. 35 (1) Alte cerinte.")
+        parsed = articles(raw)
+        self.assertEqual([part.label for part in parsed], ["33", "34", "35"])
+        art33 = article_by_label(raw, "Art. 33")
+        self.assertIn("MONITORUL OFICIAL", raw[art33.start:art33.end])
+        self.assertNotIn("Art. 34", raw[art33.start:art33.end])
+        art34 = article_by_label(raw, "34")
+        self.assertIn("(2) Documentele se arhiveaza.", raw[art34.start:art34.end])
+        self.assertEqual(article_for_hit(raw, art34.start + 5, art34.end - 5), art34)
+        self.assertEqual(art34.info(include_text=raw)["text"], raw[art34.start:art34.end])
+        with self.assertRaises(ValueError):
+            article_by_label(raw + "\nArt. 34 (3) Repetat.", "34")
+
     def test_exact_chunks_cover_all_whitespace_and_unicode(self):
         document = Parsed(parser="test")
         document.append("Știință   ISO 9001\nArt. 15", {"page": 1})
@@ -154,6 +173,14 @@ class StoreTests(unittest.TestCase):
                 same = store.scan(conn, folder, use_vectors=False)
                 self.assertEqual(same["unchanged"], 2)
 
+                # A natural-language question must have a lexical fallback even
+                # if strict Romanian FTS matches no entire phrase.
+                natural = store.search(
+                    conn, "Care sunt cerintele pentru instruire ISO 14001?",
+                    use_vectors=False,
+                )
+                self.assertTrue(natural)
+                self.assertEqual(natural[0]["path"], "other.md")
                 results = store.search(conn, "ISO 9001", use_vectors=False)
                 self.assertTrue(results, "Hybrid lexical search should return candidates")
                 self.assertEqual(results[0]["path"], "nested/procedure.txt")
