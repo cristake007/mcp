@@ -63,6 +63,13 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   attempts INTEGER NOT NULL,
   started_at TIMESTAMPTZ NOT NULL
 );
+CREATE TABLE IF NOT EXISTS site_audit_reviews (
+  url TEXT NOT NULL,
+  fields_key TEXT NOT NULL,
+  content_hash CHAR(64) NOT NULL,
+  reviewed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (url, fields_key)
+);
 """
 
 
