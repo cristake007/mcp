@@ -63,6 +63,27 @@ async def process(request: Request):
             value = await asyncio.to_thread(calculate)
             return JSONResponse(value, headers={"Cache-Control": "no-store"})
 
+        if request.url.path == "/page-image":
+            document_id = params.get("document_id")
+            page = params.get("page")
+            if type(document_id) is not int or document_id < 1:
+                raise ValueError("Invalid document_id")
+            if type(page) is not int or page < 1:
+                raise ValueError("Invalid PDF page number")
+
+            def render_page():
+                from pathlib import Path
+                from .page_image import get_page_image
+                with store.connect() as image_conn:
+                    return get_page_image(
+                        image_conn, Path(os.environ.get("RAG_DOCUMENTS", "/documents")),
+                        document_id, page,
+                    )
+
+            # PDF rendering can be expensive. Keep it off the API event loop.
+            image_data = await asyncio.to_thread(render_page)
+            return JSONResponse(image_data, headers={"Cache-Control": "no-store"})
+
         if request.url.path == "/corpus-health":
             offset = params.get("offset", 0)
             limit = params.get("limit", 50)
@@ -154,6 +175,7 @@ app = Starlette(routes=[
     Route("/stats", process, methods=["POST"]),
     Route("/documents", process, methods=["POST"]),
     Route("/document-status", process, methods=["POST"]),
+    Route("/page-image", process, methods=["POST"]),
     Route("/corpus-health", process, methods=["POST"]),
 ])
 
