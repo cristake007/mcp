@@ -398,6 +398,28 @@ def search(conn, query: str, *, limit: int = 8, use_vectors: bool = True) -> lis
         )[:limit]
 
 
+def list_figures(conn, document_id: int, page: int) -> list[dict]:
+    """Return indexed original figure IDs on a given PDF page (not image bytes)."""
+    if type(document_id) is not int or document_id < 1:
+        raise ValueError("Invalid document_id")
+    if type(page) is not int or page < 1:
+        raise ValueError("Invalid page")
+    init_schema(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT f.id AS figure_id, f.page, f.caption, f.kind,
+                      o.content AS excerpt, o.confidence AS ocr_confidence
+               FROM rag_figures f
+               JOIN rag_documents d ON d.id=f.document_id
+               LEFT JOIN rag_ocr_chunks o ON o.figure_id=f.id
+               WHERE f.document_id=%s AND f.page=%s
+                 AND lower(d.path) LIKE '%%.pdf'
+               ORDER BY f.ordinal LIMIT 12""",
+            (document_id, page),
+        )
+        return cur.fetchall()
+
+
 def get_text(conn, document_id: int, start: int | None = None,
              end: int | None = None, *, article: str | None = None) -> tuple[str, str]:
     """Return literal extracted text, optionally by legal article label."""
