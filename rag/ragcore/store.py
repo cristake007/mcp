@@ -474,7 +474,7 @@ def document_status(conn, document_id: int) -> dict:
     with conn.cursor() as cur:
         cur.execute(
             """SELECT id, path, sha256, parser, raw_text, warnings,
-                      embedding_model, indexed_at
+                      embedding_model, indexed_at, ocr_version
                FROM rag_documents WHERE id=%s""",
             (document_id,),
         )
@@ -488,6 +488,16 @@ def document_status(conn, document_id: int) -> dict:
             (document_id,),
         )
         chunks = cur.fetchall()
+        cur.execute(
+            """SELECT count(*) AS count, count(embedding) AS embeddings
+               FROM rag_ocr_chunks WHERE document_id=%s""", (document_id,),
+        )
+        ocr_count = cur.fetchone()
+        cur.execute(
+            "SELECT count(*) AS count FROM rag_figures WHERE document_id=%s",
+            (document_id,),
+        )
+        figure_count = cur.fetchone()["count"]
     from .chunking import Chunk, verify_coverage
 
     raw_text = row["raw_text"]
@@ -512,6 +522,10 @@ def document_status(conn, document_id: int) -> dict:
         errors.append("Missing embeddings for indexed model")
     if row["embedding_model"] == "none" and embeddings:
         errors.append("Unexpected embeddings for lexical-only index")
+    if row["embedding_model"] != "none" and ocr_count["embeddings"] != ocr_count["count"]:
+        errors.append("Missing embeddings for OCR chunks")
+    if row["embedding_model"] == "none" and ocr_count["embeddings"]:
+        errors.append("Unexpected OCR embeddings for lexical-only index")
 
     if not raw_text:
         status = "empty" if not errors else "incomplete"
@@ -526,6 +540,11 @@ def document_status(conn, document_id: int) -> dict:
         "text_chars": len(raw_text),
         "chunks": len(chunks),
         "embeddings": embeddings,
+        "ocr_version": row["ocr_version"],
+        "figure_regions": figure_count,
+        "ocr_chunks": ocr_count["count"],
+        "ocr_embeddings": ocr_count["embeddings"],
+        "ocr_accuracy_guaranteed": False,
         "embedding_model": row["embedding_model"],
         "warnings": row["warnings"],
         "warnings_count": len(row["warnings"]),
