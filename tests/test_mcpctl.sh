@@ -27,12 +27,12 @@ export PATH="$TMP/bin:$PATH"
 export MCPCTL_TEST_DOCKER_LOG="$TMP/docker.log"
 ctl() { bash "$TMP/mcpctl" "$@"; }
 
-ctl tools list | grep -q 'ping.*enabled'
-ctl tools list | grep -q 'inspect_site.*enabled'
-ctl tools list | grep -q 'corpus_stats.*unavailable'
+ctl tools list | grep 'ping.*enabled' >/dev/null
+ctl tools list | grep 'inspect_site.*enabled' >/dev/null
+ctl tools list | grep 'corpus_stats.*unavailable' >/dev/null
 ctl tools disable whoami
 grep -qx 'MCP_DISABLED_TOOLS=whoami' "$TMP/.env"
-ctl tools list | grep -q 'whoami.*disabled'
+ctl tools list | grep 'whoami.*disabled' >/dev/null
 ctl tools disable whoami
 [[ "$(grep -c '^MCP_DISABLED_TOOLS=' "$TMP/.env")" == 1 ]]
 ctl tools disable search_docs
@@ -55,14 +55,14 @@ ctl rag enable
 grep -q 'up -d --build indexer api' "$TMP/docker.log"
 [[ -f "$TMP/.mcp-rag-enabled" ]]
 test -n "$(grep '^RAG_API_TOKEN=' "$TMP/rag/.env")"
-ctl tools list | grep -q 'get_text.*enabled'
-ctl tools list | grep -q 'corpus_stats.*enabled'
+ctl tools list | grep 'get_text.*enabled' >/dev/null
+ctl tools list | grep 'corpus_stats.*enabled' >/dev/null
 ctl rag disable
 [[ ! -f "$TMP/.mcp-rag-enabled" ]]
 ctl rag stop
 grep -q 'stop indexer database' "$TMP/docker.log"
-ctl tools list | grep -q 'get_text.*unavailable'
-ctl tools list | grep -q 'corpus_stats.*unavailable'
+ctl tools list | grep 'get_text.*unavailable' >/dev/null
+ctl tools list | grep 'corpus_stats.*unavailable' >/dev/null
 grep -qx 'POSTGRES_PASSWORD=CI_SECRET' "$TMP/.env"
 grep -qx 'RAG_DB_PASSWORD=CI_RAG_PASSWORD' "$TMP/rag/.env"
 ctl rag stats autorizare --second-term suspendare --mode all
