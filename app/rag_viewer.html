@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Surse RAG — Documente originale</title>
+<style>
+:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color-scheme:light dark}
+*{box-sizing:border-box}
+body{margin:0;color:var(--fg,#172235);background:var(--bg,#fff);font-size:14px}
+main{padding:14px;max-width:1200px;margin:auto}
+h1{font-size:16px;line-height:1.4;margin:0}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid var(--line,#ddd);padding-bottom:12px}
+small,.muted{color:var(--muted,#687386)}
+.toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+button{background:var(--button,#f5f6f8);border:1px solid var(--line,#d4d8df);border-radius:7px;padding:7px 10px;color:inherit;cursor:pointer}
+button:hover{background:var(--hover,#e7ebf2)}
+button:disabled{opacity:.4;cursor:default}
+button:focus-visible{outline:2px solid #356ddb;outline-offset:2px}
+.layout{display:grid;grid-template-columns:minmax(180px,28%) minmax(0,1fr);gap:16px;margin-top:12px}
+aside{max-height:520px;overflow:auto;border-right:1px solid var(--line,#ddd);padding-right:10px}
+.source{display:block;text-align:left;width:100%;margin:0 0 7px 0;background:transparent;font-size:12px;overflow-wrap:anywhere}
+.source.active{background:var(--hover,#e8eefb);border-color:#739df5}
+.source b{display:block;font-size:13px;margin-bottom:3px}
+.source span{display:block;color:var(--muted,#687386);font-size:11px}
+section{min-width:0}
+.status{padding:10px 0;color:var(--muted,#687386);min-height:40px}
+.stage{background:#d7d9df;border:1px solid #bdc0c8;min-height:250px;max-height:620px;overflow:auto;display:flex;align-items:flex-start;justify-content:center;padding:8px;border-radius:8px}
+.stage img{display:block;width:100%;max-width:none;height:auto;background:#fff;box-shadow:0 2px 14px #0003}
+.fig{font-size:13px;line-height:1.5;margin:10px 0}
+pre{white-space:pre-wrap;word-break:break-word;margin:5px 0 0;background:var(--button,#f4f5f7);padding:10px;border-radius:7px;font:12px/1.5 system-ui,sans-serif;max-height:180px;overflow:auto}
+.note{margin-top:12px;font-size:12px;color:var(--muted,#687386)}
+[hidden]{display:none!important}
+@media(max-width:560px){.layout{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid var(--line,#ddd);max-height:125px;padding-bottom:6px;display:flex;gap:6px}.source{min-width:155px;max-width:210px}.stage{max-height:450px}}
+@media(prefers-color-scheme:dark){body{--fg:#e4e8ef;--bg:#171a20;--muted:#a4acb9;--line:#39414e;--button:#292f39;--hover:#323d52}}
+</style>
+</head>
+<body>
+<main>
+<header>
+<div><h1>Documente din RAG</h1><small id="query">Surse originale, fără internet</small></div>
+<div class="toolbar">
+<button id="previous" type="button" title="Pagina anterioară">‹</button>
+<span id="pagecounter" aria-live="polite">—</span>
+<button id="next" type="button" title="Pagina următoare">›</button>
+<button id="zoomOut" type="button" title="Micșorează">−</button>
+<button id="zoomIn" type="button" title="Mărește">+</button>
+<button id="zoomReset" type="button" title="Reinițializează zoom">100%</button>
+</div>
+</header>
+<div class="layout">
+<aside id="sources" aria-label="Pagini identificate"></aside>
+<section>
+<div id="sourceTitle" class="fig"></div>
+<div id="status" class="status" role="status" aria-live="polite">Se încarcă sursele MCP…</div>
+<div id="stage" class="stage" hidden><img id="image" alt="Pagina originală PDF din RAG" /></div>
+<div id="excerptWrap" hidden><small>Fragment indexat (OCR-ul poate conține erori):</small><pre id="excerpt"></pre></div>
+<div class="note">Imaginile sunt obținute exclusiv prin MCP din PDF-ul original indexat și verificat SHA-256. Nicio imagine publică sau generată.</div>
+</section>
+</div>
+</main>
+<script>
+(() => {
+  "use strict";
+  // MCP Apps JSON-RPC bridge. No fetch(), public URL, local PDF parsing, or tokens.
+  let serial = 0;
+  const pending = new Map();
+  const el = id => document.getElementById(id);
+  const state = {pages: [], selected: 0, zoom: 1, totalPages: 0, current: null, serial: 0};
+  const notify = (method,params={}) => window.parent.postMessage({jsonrpc:"2.0",method,params},"*");
+  const rpc = (method,params={}) => new Promise((resolve,reject) => {
+    const id = ++serial;
+    pending.set(id,{resolve,reject});
+    window.parent.postMessage({jsonrpc:"2.0",id,method,params},"*");
+  });
+  function unwrap(value){
+    if(value && value.structuredContent) return value.structuredContent;
+    if(value && value.result && typeof value.result==="object") return value.result;
+    if(value && Array.isArray(value.content)){
+      const first=value.content.find(x=>x && x.type==="text" && x.text);
+      if(first){try{return JSON.parse(first.text)}catch(_){}}
+    }
+    return value;
+  }
+  function status(message){el("status").textContent=message;el("status").hidden=false}
+  function setZoom(zoom){
+    state.zoom=Math.min(3,Math.max(.5,zoom));
+    el("image").style.width=Math.round(state.zoom*100)+"%";
+    el("zoomReset").textContent=Math.round(state.zoom*100)+"%";
+  }
+  function updateButtons(){
+    const page=state.current;
+    el("previous").disabled=!page||page.page<=1;
+    el("next").disabled=!page||!state.totalPages||page.page>=state.totalPages;
+    el("pagecounter").textContent=page?(page.page+" / "+(state.totalPages||"?")):"—";
+    el("zoomIn").disabled=!page;
+    el("zoomOut").disabled=!page;
+    el("zoomReset").disabled=!page;
+  }
+  function renderSourceList(){
+    const panel=el("sources");panel.replaceChildren();
+    state.pages.forEach((p,i)=>{
+      const b=document.createElement("button");
+      b.type="button";b.className="source"+(i===state.selected?" active":"");
+      const title=document.createElement("b");title.textContent=(p.path||"Document").split("/").pop();
+      const detail=document.createElement("span");
+      detail.textContent="Pagina "+p.page+(p.caption?" · "+p.caption:"");
+      b.append(title,detail);
+      b.addEventListener("click",()=>load(i));
+      panel.append(b);
+    });
+    if(!state.pages.length)panel.textContent="Nu există pagini PDF asociate căutării.";
+  }
+  async function load(index,overridePage){
+    if(index<0||index>=state.pages.length)return;
+    state.selected=index;
+    const item=state.pages[index];
+    const page=overridePage||item.page;
+    state.current={document_id:item.document_id,page};
+    state.totalPages=0;
+    const serialNow=++state.serial;
+    renderSourceList();
+    updateButtons();
+    el("stage").hidden=true;
+    el("image").removeAttribute("src");
+    el("sourceTitle").textContent=(item.path||"Document")+" · pagina "+page+(item.caption?" · "+item.caption:"");
+    el("excerpt").textContent=item.excerpt||"";
+    el("excerptWrap").hidden=!item.excerpt;
+    status("Se preia pagina originală prin MCP…");
+    try {
+      const response=await rpc("tools/call",{
+        name:"get_rag_page_data",arguments:{document_id:item.document_id,page}
+      });
+      if(serialNow!==state.serial)return;
+      const data=unwrap(response);
+      if(!data||!data.source_verified||data.mime_type!=="image/jpeg"
+          ||typeof data.image_base64!=="string"||!data.image_base64.length
+          ||data.document_id!==item.document_id||data.page!==page)
+        throw new Error("Răspuns nevalid pentru pagina PDF.");
+      state.totalPages=data.total_pages;
+      // Data URL contains only validated server-produced JPEG bytes.
+      el("image").src="data:image/jpeg;base64,"+data.image_base64;
+      el("image").alt="PDF original: "+data.path+", pagina "+data.page;
+      setZoom(1);el("stage").hidden=false;el("status").hidden=true;
+    } catch (err) {
+      if(serialNow===state.serial)status("Nu s-a putut încărca pagina din MCP: "+(err&&err.message||"eroare de comunicare"));
+    }
+    updateButtons();
+  }
+  function apply(result){
+    const data=unwrap(result);
+    if(!data||!Array.isArray(data.pages))return;
+    state.pages=data.pages.filter(x=>Number.isInteger(x.document_id)&&x.document_id>0
+      && Number.isInteger(x.page)&&x.page>0&&typeof x.path==="string"&&x.path.toLowerCase().endsWith(".pdf"));
+    state.selected=0;state.current=null;state.totalPages=0;
+    el("query").textContent=data.query||"Pagini selectate din RAG";
+    renderSourceList();
+    if(state.pages.length)load(0);
+    else status("Nicio pagină PDF identificată. Poți consulta fragmentele text din răspunsul ChatGPT.");
+  }
+  window.addEventListener("message",event=>{
+    if(event.source!==window.parent)return;
+    const data=event.data;
+    if(!data||data.jsonrpc!=="2.0")return;
+    if(typeof data.id==="number"&&pending.has(data.id)){
+      const p=pending.get(data.id);pending.delete(data.id);
+      data.error?p.reject(new Error(data.error.message||"MCP error")):p.resolve(data.result);
+      return;
+    }
+    if(data.method==="ui/notifications/tool-result")apply(data.params);
+  });
+  el("previous").onclick=()=>{if(state.current&&state.current.page>1)load(state.selected,state.current.page-1)};
+  el("next").onclick=()=>{if(state.current&&state.current.page<state.totalPages)load(state.selected,state.current.page+1)};
+  el("zoomIn").onclick=()=>setZoom(state.zoom+.25);
+  el("zoomOut").onclick=()=>setZoom(state.zoom-.25);
+  el("zoomReset").onclick=()=>setZoom(1);
+  updateButtons();
+  // Client capabilities are intentionally empty: portable MCP Apps protocol.
+  rpc("ui/initialize",{
+    appInfo:{name:"rag-document-viewer",version:"1.0.0"},
+    appCapabilities:{},protocolVersion:"2026-01-26"
+  }).then(()=>{
+    notify("ui/notifications/initialized",{});
+    // Compatibility if host pre-delivered data before bridge initialization.
+    if(window.openai && window.openai.toolOutput)apply(window.openai.toolOutput);
+  }).catch(()=>status("Gazda nu a inițializat MCP Apps. Răspunsul textual RAG rămâne disponibil."));
+})();
+</script>
+</body>
+</html>
