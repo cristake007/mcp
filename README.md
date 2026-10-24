@@ -65,6 +65,43 @@ than silently mixing versions. `end_of_sitemap` means only the URL cursor
 is finished; audit completeness requires zero errors, no pending parts, and
 all batches inspected.
 
+### Selective text extraction for faster linguistic audits
+
+Use the existing `inspect_site` tool with optional `fields` on `batch_get`
+or `get(view="text")`, e.g.:
+
+```json
+{
+  "action": "batch_get",
+  "sitemap": "cursuri-sitemap.xml",
+  "limit": 5,
+  "offset": 0,
+  "fields": ["title", "acf.grup_tinta", "acf.tematica", "acf.tematica_descriere"]
+}
+```
+
+`fields` is an output projection only; WordPress still serves the complete
+ACF JSON for each fetched course. Field names may be written with or without
+the `acf.` prefix. Nested array items are included as
+`acf.tematica[0]`, `acf.tematica[1]`, etc. Omit `fields` (or send null)
+to include all available textual fields. The response declares
+`coverage="selected"` or `coverage="all"` and reports `missing_fields`
+for requested fields not present in a given page. A selected-field audit is
+**not** an audit of all fields.
+
+`batch_get.pages[].source_map` and `get(view="text").source_map` give each
+fragment's `field` path, `start`/`end` character offsets into the full
+normalized *visible text of that field*, and `content_start`/
+`content_end` into the returned `content` piece. These are not byte
+offsets into the raw HTML. The text is not rephrased. For paginated content,
+pass the same `fields`, `max_chars` and `expected_hash` in every
+`get` request to retrieve the next part without mixing versions.
+
+This does not make linguistic decisions, detect errors, or persist a
+"previously reviewed" snapshot. Incremental comparison against prior
+audits needs a distinct baseline and an explicit review acknowledgement,
+not an automatic assumption that a page fetched by the server was audited.
+
 `batch_get` extracts all ACF leaf text values with field paths and extracts
 body text (including unknown widgets and tables) from pages. It does not
 discard fields based on grammar, and does not analyze diacritics. HTML is
