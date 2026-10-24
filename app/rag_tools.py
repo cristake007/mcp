@@ -201,7 +201,7 @@ def register_rag_tools(server: FastMCP) -> None:
         if figure_id is not None:
             parameters["figure_id"] = figure_id
         response = await asyncio.to_thread(_request, "/page-image", parameters)
-        encoded = response.pop("image_base64", None)
+        encoded = response.get("image_base64")
         if not isinstance(encoded, str) or response.get("mime_type") != "image/jpeg":
             raise RuntimeError("Invalid PDF page image response")
         try:
