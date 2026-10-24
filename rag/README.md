@@ -193,11 +193,11 @@ the **same token** in both projects by keeping it in `rag/.env`, supplied
 as an additional Compose env file to the MCP overlay.
 
 Only with the overlays active does MCP advertise `search_docs`,
-`get_text`, `corpus_stats`, `list_docs`, `document_status` and `corpus_health`
+`get_text`, `corpus_stats`, `list_docs`, `document_status`, `corpus_health` and `get_page_image`
 (unless individually disabled). The RAG API is reachable only over the opt-in
 `mcp-rag-link` Docker network and requires a shared bearer secret.
 The HTTP API offers only read-only POST `/search`, `/text`, `/stats`,
-`/documents`, `/document-status`, `/corpus-health`; no document
+`/documents`, `/document-status`, `/corpus-health`, `/page-image`; no document
 writing, admin endpoints, browser UI or public listening ports.
 
 `search_docs` returns literal indexed chunks, their source offsets,
@@ -208,6 +208,46 @@ legal quotes against the original document. `get_text` returns literal
 stored text by document ID with optional `start`/`end` or `article`
 (e.g. `"Art. 34"`). Ambiguous/repeated article numbers require offsets.
 HTTP text output is limited to 25,000 characters per call.
+
+### Images from indexed PDF manuals: `get_page_image`
+
+PDF search results from `search_docs` already include source `locations`
+(for example `{"kind":"pdf_page","page":13}`). To return the *original
+illustration* while answering a question, use `get_page_image` with the
+`document_id` from the search result and a **real PDF page number** from its
+location metadata. The tool returns two native MCP content blocks: a text
+description with source path/page and an `image/jpeg` image of the
+**complete original PDF page**. It does not generate or invent an illustration.
+
+`get_page_image(document_id=12, page=13)`
+
+The PDF is loaded on demand from `rag/documents`, through the already
+existing **read-only mount in the private RAG API**, never through MCP's file
+system. The endpoint accepts only indexed document IDs; it rejects traversal,
+symlinks, missing files, unsupported formats, invalid page numbers and PDF
+files whose current SHA-256 does not match the index. It rechecks the file
+after rendering, to detect concurrent changes. No images or base64 are
+stored in PostgreSQL, and no new vector model, OCR, cloud provider or public
+image URL is used.
+
+Rendered JPEG output is limited to at most 1050 x 1500 pixels and 850 KiB,
+so it can travel through the private MCP bridge. Source page images are
+visually faithful *renderings*, not lossless PNGs of the original images.
+The tool **does not perform visual semantic indexing**: `search_docs`
+finds text and page references; screenshots without extractable text are not
+automatically searchable by their visual content. If a page includes multiple
+figures, the tool returns the full page rather than choosing a figure.
+
+Native MCP image blocks are supported by the protocol and FastMCP, but their
+visibility inside individual clients (including ChatGPT) depends on the
+client UI. If the client does not display the image inline, this is a client
+display limitation, not a sign that the server returned an invented image.
+No public file link is exposed as a fallback.
+
+To activate after `git pull`, run `./mcpctl rag enable` from the repository
+root, then refresh the MCP tools in ChatGPT. Place the manual under
+`rag/documents/`, let the indexer ingest it, and check `corpus_health`.
+The original PDF is never modified.
 
 ### Document inventory and index health (stage 3)
 
