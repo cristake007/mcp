@@ -9,7 +9,7 @@ MAIN_ENV="$ROOT/.env"
 RAG_ENV="$RAG/.env"
 RAG_FLAG="$ROOT/.mcp-rag-enabled"
 cd "$ROOT"
-TOOLS=(ping whoami inspect_site search_docs get_text corpus_stats)
+TOOLS=(ping whoami inspect_site search_docs get_text corpus_stats list_docs document_status corpus_health)
 
 die() { printf 'Eroare: %s\n' "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*"; }
@@ -47,7 +47,8 @@ MCP Control — comenzi administrative (din orice director)
   ./mcpctl mcp apply                 Aplica/recreeaza MCP cu setarile curente
   ./mcpctl mcp logs                  Urmareste logurile MCP
 
-Tool-uri: ping, whoami, inspect_site, search_docs, get_text, corpus_stats
+Tool-uri: ping, whoami, inspect_site, search_docs, get_text, corpus_stats,
+          list_docs, document_status, corpus_health
 Exemple:
   ./mcpctl user add coleg@example.ro
   ./mcpctl tools disable whoami
@@ -151,7 +152,7 @@ tool_list() {
     for tool in "${TOOLS[@]}"; do
         if is_disabled "$disabled" "$tool"; then
             state="disabled"
-        elif [[ "$tool" == "search_docs" || "$tool" == "get_text" || "$tool" == "corpus_stats" ]] && (( ! rag_state )); then
+        elif [[ "$tool" == "search_docs" || "$tool" == "get_text" || "$tool" == "corpus_stats" || "$tool" == "list_docs" || "$tool" == "document_status" || "$tool" == "corpus_health" ]] && (( ! rag_state )); then
             state="unavailable (RAG neconectat)"
         else
             state="enabled"
