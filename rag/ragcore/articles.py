@@ -54,7 +54,7 @@ def article_for_hit(raw_text: str, start: int, end: int,
                   if item.start < end and item.end > start]
     if not candidates:
         return None
-    terms = {word for word in re.findall(r"[^\\W_]+", query.casefold())
+    terms = {word for word in re.findall(r"[^\W_]+", query.casefold())
              if len(word) >= 4}
     def score(item: Article) -> tuple[int, int]:
         a = max(start, item.start)
