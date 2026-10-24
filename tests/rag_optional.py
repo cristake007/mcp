@@ -13,7 +13,7 @@ async def main():
     enabled = os.getenv("MCP_RAG_ENABLED") == "1"
     expected = {"ping", "whoami", "inspect_site"}
     if enabled:
-        expected |= {"search_docs", "get_text", "corpus_stats"}
+        expected |= {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status"}
     expected -= disabled
     assert tools == expected, (tools, expected)
 
@@ -24,7 +24,7 @@ async def main():
     isolated = FastMCP("optional-tools-test")
     register_rag_tools(isolated)
     custom = {tool.name: tool for tool in await isolated.list_tools()}
-    assert set(custom) == {"search_docs", "get_text", "corpus_stats"} - disabled
+    assert set(custom) == {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status"} - disabled
     expected = "Art. 15\n  Verificare anuală.\n"
     if "corpus_stats" in custom:
         stats_result = {
@@ -45,6 +45,25 @@ async def main():
                 "mode": "all", "examples_limit": 3,
                 "match_type": "linguistic",
             })
+    if "list_docs" in custom:
+        listing = {
+            "total_documents": 1,
+            "documents": [{"document_id": 14, "path": "manual.pdf", "warnings_count": 0}],
+            "next_offset": None, "source_check": "not_performed",
+        }
+        with patch("app.rag_tools._request", return_value=listing) as request:
+            result = await custom["list_docs"].run({"offset": 0, "limit": 10})
+            assert result.structured_content == listing, result
+            request.assert_called_once_with("/documents", {"offset": 0, "limit": 10})
+    if "document_status" in custom:
+        record = {"document_id": 14, "status": "indexed_complete",
+                  "chunks": 20, "stored_text_coverage_complete": True,
+                  "source_check": "not_performed"}
+        with patch("app.rag_tools._request", return_value=record) as request:
+            result = await custom["document_status"].run({"document_id": 14})
+            assert result.structured_content == record, result
+            request.assert_called_once_with("/document-status", {"document_id": 14})
+
     if "get_text" not in custom:
         return
     with patch("app.rag_tools._request", return_value={
