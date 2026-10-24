@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Imagini originale din RAG</title>
+<style>
+:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color-scheme:light dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg,#fff);color:var(--fg,#172235);font-size:14px}
+main{max-width:1050px;margin:0 auto;padding:14px}
+header{display:flex;justify-content:space-between;align-items:center;gap:10px;padding-bottom:10px;border-bottom:1px solid var(--line,#ddd)}
+h1{font-size:16px;margin:0 0 3px}
+small,.note{font-size:11px;color:var(--muted,#667287)}
+.toolbar{display:flex;gap:5px;align-items:center}
+button{border:1px solid var(--line,#d4d8df);background:var(--button,#f5f6f8);padding:7px 10px;border-radius:7px;color:inherit;cursor:pointer}
+button:disabled{opacity:.45;cursor:default}
+button:focus-visible{outline:2px solid #356ddb;outline-offset:2px}
+#gallery{display:flex;gap:7px;overflow:auto;padding-top:12px}
+#gallery[hidden]{display:none}
+.picker{font-size:12px;text-align:left;max-width:300px;min-width:150px;white-space:normal;overflow-wrap:anywhere}
+.picker.active{border-color:#7697ed;background:var(--chosen,#e8eefb)}
+#source{margin:11px 0 8px;overflow-wrap:anywhere}
+#source b{display:block;font-size:13px}
+#source span{font-size:12px;color:var(--muted,#667287)}
+#status{padding:16px 0;min-height:40px}
+#figureContainer{border-radius:8px;border:1px solid var(--line,#ddd);padding:8px;overflow:auto;max-height:720px;text-align:center}
+#figureContainer img{display:block;width:100%;max-width:none;height:auto;object-fit:contain;margin:auto}
+#context{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.45;background:var(--button,#f4f6f8);border-radius:7px;padding:10px;max-height:160px;overflow:auto}
+.note{margin-top:10px}
+[hidden]{display:none!important}
+@media(prefers-color-scheme:dark){body{--bg:#181b20;--fg:#e8eaf0;--muted:#aab3c1;--line:#38404b;--button:#29303a;--chosen:#313f59}}
+</style>
+</head>
+<body>
+<main>
+<header>
+<div><h1>Imagini din RAG</h1><small id="subtitle">Figuri originale, nu pagini PDF</small></div>
+<div class="toolbar">
+<button id="zoomOut" type="button" aria-label="Micșorează imaginea">−</button>
+<button id="zoomIn" type="button" aria-label="Mărește imaginea">+</button>
+<button id="zoomReset" type="button" aria-label="Zoom inițial">100%</button>
+</div>
+</header>
+<div id="gallery" aria-label="Figuri găsite" hidden></div>
+<div id="source"></div>
+<div id="status" role="status" aria-live="polite">Se încarcă imaginile din RAG…</div>
+<div id="figureContainer" hidden>
+<img id="figure" alt="Figură originală din PDF-ul indexat în RAG">
+</div>
+<details id="details" hidden>
+<summary>Etichete OCR asociate</summary>
+<div id="context"></div>
+</details>
+<div class="note">Imaginea este decupată pe server din PDF-ul original verificat SHA-256. Nu este un PDF navigabil și nu folosește imagini de pe internet.</div>
+</main>
+<script>
+(() => {
+"use strict";
+let nextId=0;
+const pending=new Map();
+const $=id=>document.getElementById(id);
+const state={figures:[],selected:0,zoom:1,sequence:0};
+const notify=(method,params={})=>window.parent.postMessage({jsonrpc:"2.0",method,params},"*");
+const call=(method,params={})=>new Promise((resolve,reject)=>{
+  const id=++nextId;
+  pending.set(id,{resolve,reject});
+  window.parent.postMessage({jsonrpc:"2.0",id,method,params},"*");
+});
+function unwrap(value){
+  if(value&&value.structuredContent)return value.structuredContent;
+  if(value&&value.result&&typeof value.result==="object")return value.result;
+  if(value&&Array.isArray(value.content)){
+    const first=value.content.find(x=>x&&x.type==="text"&&x.text);
+    if(first){try{return JSON.parse(first.text)}catch(_){}}
+  }
+  return value;
+}
+function message(text){$("status").hidden=false;$("status").textContent=text}
+function zoom(value){
+  state.zoom=Math.min(3,Math.max(.5,value));
+  $("figure").style.width=Math.round(state.zoom*100)+"%";
+  $("zoomReset").textContent=Math.round(state.zoom*100)+"%";
+}
+function gallery(){
+  const wrap=$("gallery");wrap.replaceChildren();
+  wrap.hidden=state.figures.length<2;
+  state.figures.forEach((f,i)=>{
+    const button=document.createElement("button");
+    button.type="button";
+    button.className="picker"+(state.selected===i?" active":"");
+    button.textContent=(f.caption||"Figură "+(i+1))+" · p. "+f.page;
+    button.addEventListener("click",()=>display(i));
+    wrap.append(button);
+  });
+}
+async function display(index){
+  if(index<0||index>=state.figures.length)return;
+  const figure=state.figures[index];
+  state.selected=index;
+  const serial=++state.sequence;
+  $("figureContainer").hidden=true;
+  $("figure").removeAttribute("src");
+  $("details").hidden=true;
+  $("source").replaceChildren();
+  const filename=document.createElement("b");
+  filename.textContent=(figure.path||"Document").split("/").pop();
+  const caption=document.createElement("span");
+  caption.textContent=(figure.caption||"Imagine indexată")+" · pagina "+figure.page;
+  $("source").append(filename,caption);
+  gallery();
+  message("Se încarcă figura originală prin MCP…");
+  try{
+    // Only a server-validated indexed figure_id is permitted.
+    const result=unwrap(await call("tools/call",{
+      name:"get_rag_page_data",
+      arguments:{document_id:figure.document_id,page:figure.page,figure_id:figure.figure_id}
+    }));
+    if(serial!==state.sequence)return;
+    if(!result||result.source_verified!==true||
+       result.image_kind!=="cropped_original_pdf_figure"||
+       result.mime_type!=="image/jpeg"||
+       result.figure_id!==figure.figure_id||
+       result.document_id!==figure.document_id||
+       result.page!==figure.page||
+       typeof result.image_base64!=="string"||!result.image_base64.length){
+      throw new Error("Sursa nu este o figură originală validată.");
+    }
+    $("figure").src="data:image/jpeg;base64,"+result.image_base64;
+    $("figure").alt=(figure.caption||"Figura originală")+", pagina "+figure.page;
+    zoom(1);
+    $("figureContainer").hidden=false;
+    $("status").hidden=true;
+    if(figure.excerpt){
+      $("context").textContent=figure.excerpt;
+      $("details").hidden=false;
+    }
+  }catch(error){
+    if(serial===state.sequence)message("Imaginea nu a putut fi obținută din RAG: "+(error?.message||"eroare"));
+  }
+}
+function apply(input){
+  const value=unwrap(input);
+  if(!value||!Array.isArray(value.pages))return;
+  state.figures=value.pages.filter(f=>Number.isInteger(f.document_id)&&f.document_id>0
+    &&Number.isInteger(f.page)&&f.page>0
+    &&Number.isInteger(f.figure_id)&&f.figure_id>0
+    &&typeof f.path==="string"&&f.path.toLowerCase().endsWith(".pdf"));
+  $("subtitle").textContent=value.query||"Figuri din documente indexate";
+  if(state.figures.length)display(0);
+  else{
+    $("figureContainer").hidden=true;
+    gallery();
+    message("Nu a fost identificată o figură indexată relevantă. RAG-ul poate furniza textul, dar aplicația nu va afișa pagina PDF completă.");
+  }
+}
+window.addEventListener("message",event=>{
+  if(event.source!==window.parent)return;
+  const value=event.data;
+  if(!value||value.jsonrpc!=="2.0")return;
+  if(typeof value.id==="number"&&pending.has(value.id)){
+    const current=pending.get(value.id);
+    pending.delete(value.id);
+    value.error?current.reject(new Error(value.error.message||"MCP error")):current.resolve(value.result);
+    return;
+  }
+  if(value.method==="ui/notifications/tool-result")apply(value.params);
+});
+$("zoomIn").onclick=()=>zoom(state.zoom+.25);
+$("zoomOut").onclick=()=>zoom(state.zoom-.25);
+$("zoomReset").onclick=()=>zoom(1);
+call("ui/initialize",{
+  appInfo:{name:"rag-figure-gallery",version:"2.0.0"},
+  appCapabilities:{},protocolVersion:"2026-01-26"
+}).then(()=>{
+  notify("ui/notifications/initialized",{});
+  if(window.openai&&window.openai.toolOutput)apply(window.openai.toolOutput);
+}).catch(()=>message("Gazda nu a inițializat MCP Apps. Consultă rezultatele textului RAG."));
+})();
+</script>
+</body>
+</html>
