@@ -77,6 +77,21 @@ class OriginalFigureTests(unittest.IsolatedAsyncioTestCase):
                         "document_id": doc_id, "page": 1,
                         "figure_id": figures[1]["id"],
                     }
+                    inventory = await client.post(
+                        "/figures", json={"document_id": doc_id, "page": 1},
+                        headers=headers,
+                    )
+                    self.assertEqual(inventory.status_code, 200, inventory.text)
+                    refs = inventory.json()["figures"]
+                    self.assertEqual(len(refs), 2)
+                    self.assertEqual(refs[1]["figure_id"], figures[1]["id"])
+                    self.assertIn("Figure 4", refs[1]["caption"])
+                    for bad_id in (True, 0, -1, "wrong"):
+                        bad = await client.post(
+                            "/figures", json={"document_id": bad_id, "page": 1},
+                            headers=headers,
+                        )
+                        self.assertEqual(bad.status_code, 400, bad.text)
                     ok = await client.post("/page-image", json=request, headers=headers)
                     self.assertEqual(ok.status_code, 200, ok.text[:300])
                     self.assertEqual(ok.json()["image_kind"], "cropped_original_pdf_figure")
