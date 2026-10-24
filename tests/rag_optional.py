@@ -98,6 +98,18 @@ async def main():
             request.assert_called_once_with(
                 "/page-image", {"document_id": 14, "page": 2},
             )
+        # Figure selection forwards only the index-grounded figure ID.
+        with patch("app.rag_tools._request", return_value={
+            **payload, "figure_id": 21,
+            "image_kind": "cropped_original_pdf_figure",
+        }) as request:
+            result = await custom["get_page_image"].run({
+                "document_id": 14, "page": 2, "figure_id": 21,
+            })
+            assert isinstance(result.content[1], ImageContent), result
+            request.assert_called_once_with(
+                "/page-image", {"document_id": 14, "page": 2, "figure_id": 21},
+            )
 
     if "get_text" not in custom:
         return
