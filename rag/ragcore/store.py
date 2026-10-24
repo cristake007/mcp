@@ -2,6 +2,7 @@
 import hashlib
 import os
 import re
+from contextlib import nullcontext
 from pathlib import Path
 
 import psycopg
@@ -13,6 +14,7 @@ from .chunking import make_chunks, verify_coverage
 from .embeddings import MODEL_ID, Embedder, cached_embedder
 from .parsing import SUPPORTED, parse_file
 from .ocr import OCR_VERSION, enabled as ocr_enabled, extract_pdf_figures
+from .orientation import ORIENTATION_VERSION, enabled as orientation_enabled, normalized_pdf
 
 
 def connect():
@@ -83,24 +85,31 @@ def _scan_locked(conn, folder: Path, *, use_vectors: bool,
             if initial_stat.st_size > 30 * 1024 * 1024:
                 raise ValueError("File larger than 30 MB limit")
             signature = file_digest(path)
-            requested_ocr_version = (OCR_VERSION if path.suffix.lower() == ".pdf"
-                                     and ocr_enabled() else 0)
+            is_pdf = path.suffix.lower() == ".pdf"
+            requested_ocr_version = OCR_VERSION if is_pdf and ocr_enabled() else 0
+            requested_orientation_version = (
+                ORIENTATION_VERSION if is_pdf and orientation_enabled() else 0
+            )
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT sha256, embedding_model, ocr_version FROM rag_documents WHERE path=%s",
+                    """SELECT sha256, embedding_model, ocr_version, orientation_version
+                       FROM rag_documents WHERE path=%s""",
                     (relative,),
                 )
                 previous = cur.fetchone()
             if (previous and previous["sha256"] == signature
                     and previous["embedding_model"] == embedding_model
-                    and previous["ocr_version"] == requested_ocr_version):
+                    and previous["ocr_version"] == requested_ocr_version
+                    and previous["orientation_version"] == requested_orientation_version):
                 numbers["unchanged"] += 1
                 continue
 
-            parsed = parse_file(path)
-            figures, ocr_warnings = (
-                extract_pdf_figures(path) if requested_ocr_version else ([], [])
-            )
+            preparation = normalized_pdf(path) if is_pdf else nullcontext((path, {}))
+            with preparation as (working_path, page_rotations):
+                parsed = parse_file(working_path)
+                figures, ocr_warnings = (
+                    extract_pdf_figures(working_path) if requested_ocr_version else ([], [])
+                )
             parsed.warnings.extend(ocr_warnings)
             chunks = make_chunks(parsed.raw_text, parsed.units)
             verify_coverage(parsed.raw_text, chunks)
@@ -135,16 +144,21 @@ def _scan_locked(conn, folder: Path, *, use_vectors: bool,
                 with conn.cursor() as cur:
                     cur.execute(
                         """INSERT INTO rag_documents
-                        (path, sha256, parser, raw_text, warnings, embedding_model, ocr_version)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s)
+                        (path, sha256, parser, raw_text, warnings, embedding_model,
+                         ocr_version, orientation_version, page_rotations)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (path) DO UPDATE SET
                           sha256=EXCLUDED.sha256, parser=EXCLUDED.parser,
                           raw_text=EXCLUDED.raw_text, warnings=EXCLUDED.warnings,
                           embedding_model=EXCLUDED.embedding_model,
-                          ocr_version=EXCLUDED.ocr_version, indexed_at=now()
+                          ocr_version=EXCLUDED.ocr_version,
+                          orientation_version=EXCLUDED.orientation_version,
+                          page_rotations=EXCLUDED.page_rotations, indexed_at=now()
                         RETURNING id""",
                         (relative, signature, parsed.parser, parsed.raw_text,
-                         Jsonb(parsed.warnings), embedding_model, requested_ocr_version),
+                         Jsonb(parsed.warnings), embedding_model, requested_ocr_version,
+                         requested_orientation_version,
+                         Jsonb({str(p): angle for p, angle in page_rotations.items()})),
                     )
                     doc_id = cur.fetchone()["id"]
                     # Replacing a document revision is atomic for text AND OCR.
@@ -183,7 +197,8 @@ def _scan_locked(conn, folder: Path, *, use_vectors: bool,
             if not chunks:
                 numbers["empty"] += 1
             print(f"INDEXED {relative}: {len(chunks)} text chunks; "
-                  f"figures={len(figures)}, ocr_chunks={len(ocr_texts)}; "
+                  f"figures={len(figures)}, ocr_chunks={len(ocr_texts)}, "
+                  f"rotated_pages={len(page_rotations)}; "
                   f"warnings={len(parsed.warnings)}", flush=True)
             for warning in parsed.warnings:
                 print(f"  WARNING {relative}: {warning}", flush=True)
@@ -423,7 +438,8 @@ def list_documents(conn, *, offset: int = 0, limit: int = 50) -> dict:
                       count(c.id) AS chunks,
                       count(c.embedding) AS embeddings,
                       (SELECT count(*) FROM rag_figures f WHERE f.document_id=d.id) AS figures,
-                      (SELECT count(*) FROM rag_ocr_chunks o WHERE o.document_id=d.id) AS ocr_chunks
+                      (SELECT count(*) FROM rag_ocr_chunks o WHERE o.document_id=d.id) AS ocr_chunks,
+                      d.orientation_version, d.page_rotations
                FROM rag_documents d
                LEFT JOIN rag_chunks c ON c.document_id = d.id
                GROUP BY d.id
@@ -441,6 +457,8 @@ def list_documents(conn, *, offset: int = 0, limit: int = 50) -> dict:
             "embeddings": row["embeddings"],
             "figures": row["figures"],
             "ocr_chunks": row["ocr_chunks"],
+            "orientation_version": row["orientation_version"],
+            "rotated_pages": len(row["page_rotations"]),
             "embedding_model": row["embedding_model"],
             "warnings_count": row["warnings_count"],
             "has_warnings": row["warnings_count"] > 0,
@@ -474,7 +492,8 @@ def document_status(conn, document_id: int) -> dict:
     with conn.cursor() as cur:
         cur.execute(
             """SELECT id, path, sha256, parser, raw_text, warnings,
-                      embedding_model, indexed_at, ocr_version
+                      embedding_model, indexed_at, ocr_version,
+                      orientation_version, page_rotations
                FROM rag_documents WHERE id=%s""",
             (document_id,),
         )
@@ -541,6 +560,9 @@ def document_status(conn, document_id: int) -> dict:
         "chunks": len(chunks),
         "embeddings": embeddings,
         "ocr_version": row["ocr_version"],
+        "orientation_version": row["orientation_version"],
+        "page_rotations": row["page_rotations"],
+        "rotated_pages": len(row["page_rotations"]),
         "figure_regions": figure_count,
         "ocr_chunks": ocr_count["count"],
         "ocr_embeddings": ocr_count["embeddings"],
