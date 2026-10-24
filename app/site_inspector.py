@@ -331,20 +331,24 @@ def _page_chunks(content: str, part: int, size: int, expected_hash: str = "") ->
     }
 
 
-def _batch_page(url: str, chars_per_page: int) -> dict:
+def _batch_page(url: str, chars_per_page: int, fields: tuple[str, ...] | None = None) -> dict:
+    from app.site_fields import extract_with_sources, slice_sources
     data = _read_page(url)
-    text, warnings = _audit_text(data)
+    text, warnings, spans, missing = extract_with_sources(data, fields)
     chunks = _page_chunks(text, 0, chars_per_page)
     return {
         "url": url,
         "format": data["format"],
         "id": data.get("id"),
         "warnings": warnings,
+        "missing_fields": missing,
+        "source_map": slice_sources(spans, 0, chars_per_page, len(chunks["content"])),
         **chunks,
         "retrieve_remaining": (
             {"action": "get", "url": url, "view": "text",
              "part": 1, "max_chars": chars_per_page,
-             "expected_hash": chunks["sha256"]}
+             "expected_hash": chunks["sha256"],
+             "fields": list(fields) if fields is not None else None}
             if chunks["next_part"] is not None else None
         ),
     }
@@ -394,6 +398,7 @@ def inspect_site(
     view: str = "raw",
     part: int = 0,
     expected_hash: str = "",
+    fields: list[str] | None = None,
 ) -> dict:
     """Inspect live tuvkarpat.ro through one MCP tool.
 
@@ -403,6 +408,9 @@ def inspect_site(
       visible HTML text or all ACF text fields (labeled with paths). For a large
       page request each next_part using the same max_chars and expected_hash.
     batch_get: retrieve up to five pages per call from an explicit sitemap.
+      Optional fields=['title','acf.grup_tinta','acf.tematica'] reduces
+      returned content. Without fields, all available text is kept.
+      source_map identifies field paths and exact visible-text positions.
       Default batch text limit is 12000 characters PER page, with additional
       parts recoverable through get(view='text', part=...).
       Follow both next_offset and pending_parts; inspect all errors.
@@ -424,6 +432,9 @@ def inspect_site(
     if view not in ("raw", "text"):
         raise ValueError("view trebuie să fie raw sau text")
 
+    from app.site_fields import normalize_fields, extract_with_sources, slice_sources
+    selectors = normalize_fields(fields)
+
     if action == "sitemaps":
         return {"action": action, "sitemaps": _sitemaps()}
 
@@ -443,12 +454,19 @@ def inspect_site(
             raise ValueError("Precizează url")
         data = _read_page(url)
         if view == "text":
-            text, warnings = _audit_text(data)
+            text, warnings, spans, missing = extract_with_sources(data, selectors)
             chunks = _page_chunks(text, part, max_chars, expected_hash)
             return {
                 "action": action, "url": url, "view": view,
-                "format": data["format"], "warnings": warnings, **chunks,
+                "format": data["format"], "warnings": warnings,
+                "missing_fields": missing,
+                "fields": list(selectors) if selectors is not None else None,
+                "coverage": "selected" if selectors is not None else "all",
+                "source_map": slice_sources(spans, part, max_chars, len(chunks["content"])),
+                **chunks,
             }
+        if selectors is not None:
+            raise ValueError("fields se folosește numai cu view='text' sau batch_get")
         if data["format"] == "acf_json":
             payload = json.dumps(data, ensure_ascii=False)
             chunks = _page_chunks(payload, part, max_chars, expected_hash)
@@ -482,7 +500,7 @@ def inspect_site(
         pages = []
         errors = []
         with ThreadPoolExecutor(max_workers=3) as pool:
-            futures = [pool.submit(_batch_page, item, chars_per_page) for item in current]
+            futures = [pool.submit(_batch_page, item, chars_per_page, selectors) for item in current]
             for item, future in zip(current, futures):
                 try:
                     pages.append(future.result())
@@ -495,6 +513,8 @@ def inspect_site(
         ]
         return {
             "action": action, "sitemap": selected, "total_urls": len(urls),
+            "fields": list(selectors) if selectors is not None else None,
+            "coverage": "selected" if selectors is not None else "all",
             "offset": offset, "requested_limit": limit,
             "processed": len(current), "pages": pages, "errors": errors,
             "next_offset": next_offset if next_offset < len(urls) else None,
