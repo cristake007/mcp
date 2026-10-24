@@ -68,7 +68,7 @@ def corpus_stats(conn, term: str, second_term: str | None = None,
                  match_type: str = "linguistic") -> dict:
     """Count full corpus and report bounded examples, never sampled totals."""
     terms, patterns = validate(term, second_term, mode, examples_limit, match_type)
-    def count(value):
+    def count_matches(value):
         if match_type == "exact":
             return match_counts(normalize(value), patterns)
         return count_phrases(value, patterns)
@@ -92,7 +92,7 @@ def corpus_stats(conn, term: str, second_term: str | None = None,
             doc_id = row["id"]
             path = row["path"]
             totals["documents_scanned"] += 1
-            counts = count(raw)
+            counts = count_matches(raw)
             for n, count in enumerate(counts):
                 totals["occurrences_per_term"][n] += count
             document_matches = meets(counts, mode)
@@ -103,7 +103,7 @@ def corpus_stats(conn, term: str, second_term: str | None = None,
             totals["articles_detected"] += len(document_articles)
             matched_in_doc = 0
             for item in document_articles:
-                article_counts = count(raw[item.start:item.end])
+                article_counts = count_matches(raw[item.start:item.end])
                 if meets(article_counts, mode):
                     matched_in_doc += 1
                     totals["matching_articles"] += 1
