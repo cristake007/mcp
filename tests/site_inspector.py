@@ -608,5 +608,81 @@ class SiteInspectorTests(unittest.TestCase):
 
 
 
+    def test_batch_coverage_tracks_missing_fields_and_unfinished_parts(self):
+        sitemap = "https://tuvkarpat.ro/cursuri-sitemap.xml"
+        urls = ["https://tuvkarpat.ro/cursuri/ok/",
+                "https://tuvkarpat.ro/cursuri/long/",
+                "https://tuvkarpat.ro/cursuri/missing/",
+                "https://tuvkarpat.ro/cursuri/error/"]
+        def read(url):
+            if url == urls[3]:
+                raise RuntimeError("HTTP 503")
+            if url == urls[1]:
+                payload = "text " * 450
+            else:
+                payload = "Pregătirea auditori"
+            acf = {"tematica": payload}
+            if url == urls[2]:
+                acf = {"alt": payload}
+            return {"url": url, "title": "Curs", "format": "acf_json", "acf": acf}
+        with (patch.object(site, "_sitemaps", return_value=[sitemap]),
+              patch.object(site, "_urls", return_value=urls),
+              patch.object(site, "_read_page", side_effect=read)):
+            batch = site.inspect_site(
+                "batch_get", sitemap="cursuri-sitemap.xml",
+                fields=["title", "acf.tematica"], max_chars=1000, limit=10)
+            report = batch["coverage_report"]
+            self.assertEqual(report["requested_urls"], 4)
+            self.assertEqual(report["fetched_urls"], 3)
+            self.assertEqual(report["content_returned_urls"], 3)
+            self.assertEqual(report["fully_returned_urls"], 2)
+            self.assertEqual(report["pending_continuation_urls"], [urls[1]])
+            self.assertEqual(report["missing_fields"],
+                             [{"url": urls[2], "fields": ["acf.tematica"]}])
+            self.assertEqual(report["failed_urls"], [urls[3]])
+            self.assertEqual(set(report["requires_followup_urls"]),
+                             set(urls[1:]))
+            self.assertIsNone(report["model_reviewed_urls"])
+            self.assertFalse(batch["batch_complete"])
+
+    def test_audit_report_is_explicit_baseline_only_and_paginated(self):
+        sitemap = "https://tuvkarpat.ro/cursuri-sitemap.xml"
+        archive = "https://tuvkarpat.ro/cursuri/"
+        urls = [f"https://tuvkarpat.ro/cursuri/test-{i}/" for i in range(5)]
+        snapshot = {
+            urls[0]: {"sha256": "a"*64, "reviewed_at": "2026-10-24T12:00:00+00:00"},
+            urls[2]: {"sha256": "b"*64, "reviewed_at": "2026-10-24T12:05:00+00:00"},
+        }
+        from app.site_fields import normalize_fields
+        selectors = normalize_fields(["title", "acf.tematica"])
+        with (patch.object(site, "_sitemaps", return_value=[sitemap]),
+              patch.object(site, "_urls", return_value=[archive]+urls),
+              patch("app.site_audit.get_reviews", return_value=snapshot) as get_reviews,
+              patch.object(site, "_read_page") as read):
+            report = site.inspect_site(
+                "audit_report", sitemap="cursuri-sitemap.xml",
+                fields=["title", "acf.tematica"], limit=2)
+            self.assertEqual(report["total_urls"], 6)
+            self.assertEqual(report["auditable_urls"], 5)
+            self.assertEqual(report["acknowledged_urls"], 2)
+            self.assertEqual(report["not_acknowledged_urls"], 3)
+            self.assertEqual(report["next_offset"], 2)
+            self.assertFalse(report["current_site_freshness_checked"])
+            self.assertFalse(report["extraction_completed_in_this_report"])
+            self.assertEqual(report["entries"][0]["status"],
+                             "acknowledged_not_live_verified")
+            self.assertEqual(report["entries"][1]["status"], "not_acknowledged")
+            next_page = site.inspect_site(
+                "audit_report", sitemap="cursuri-sitemap.xml",
+                fields=["title", "acf.tematica"], offset=4, limit=2)
+            self.assertIsNone(next_page["next_offset"])
+            self.assertEqual(len(next_page["entries"]), 1)
+            get_reviews.assert_called_with(urls, selectors)
+            read.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "explicit"):
+            site.inspect_site("audit_report", sitemap="all")
+
+
+
 if __name__ == "__main__":
     unittest.main()
