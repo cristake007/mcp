@@ -5,7 +5,7 @@ always absent when MCP_RAG_ENABLED is not 1, regardless of this allowlist.
 """
 import os
 
-TOOLS = ("ping", "whoami", "inspect_site", "search_docs", "get_text", "corpus_stats")
+TOOLS = ("ping", "whoami", "inspect_site", "search_docs", "get_text", "corpus_stats", "list_docs", "document_status")
 
 
 def disabled_tools() -> frozenset[str]:
