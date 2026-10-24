@@ -5,10 +5,13 @@ from an original file with an exact index hash.
 """
 import base64
 import os
+import sys
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ragcore import store
 from ragcore.page_image import get_page_image
