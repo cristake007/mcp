@@ -34,10 +34,11 @@ MCP Control — comenzi administrative (din orice director)
   ./mcpctl rag enable                Activeaza integrarea MCP ↔ RAG
   ./mcpctl rag disable               Dezactiveaza integrarea, PASTREAZA RAG
   ./mcpctl rag status                Starea RAG
-  ./mcpctl rag start                 Porneste doar baza RAG
-  ./mcpctl rag stop                  Opreste doar RAG (daca nu este conectat)
+  ./mcpctl rag start                 Porneste RAG + indexarea automata
+  ./mcpctl rag stop                  Opreste indexerul si baza RAG
   ./mcpctl rag scan [optiuni]        Indexare documente recursiva
   ./mcpctl rag verify                Verifica exactitatea fragmentelor
+  ./mcpctl rag logs                  Loguri indexare automata
   ./mcpctl rag search "intrebare"    Cauta in documentele indexate
 
   ./mcpctl mcp start                 Porneste MCP (+ baza sa)
@@ -201,9 +202,9 @@ rag_enable() {
     if ! docker network inspect mcp-rag-link >/dev/null 2>&1; then
         docker network create mcp-rag-link >/dev/null
     fi
-    info "Pornesc API-ul RAG separat..."
+    info "Pornesc indexarea automata si API-ul RAG separat..."
     docker compose --env-file "$RAG_ENV" -f "$RAG/compose.yaml" \
-        -f "$RAG/compose.mcp.yaml" up -d --build api
+        -f "$RAG/compose.mcp.yaml" up -d --build indexer api
     info "Activez instrumentele RAG in MCP..."
     docker compose --env-file "$MAIN_ENV" --env-file "$RAG_ENV" \
         -f "$ROOT/compose.yaml" -f "$ROOT/compose.rag.yaml" \
@@ -285,13 +286,18 @@ rag_command() {
         start)
             [[ $# == 0 ]] || die "rag start nu accepta argumente"
             need_docker
-            rag_compose up -d database
+            rag_compose up -d --build database indexer
             ;;
         stop)
             [[ $# == 0 ]] || die "rag stop nu accepta argumente"
             need_docker
             rag_connected && die "Dezactiveaza mai intai legatura: ./mcpctl rag disable"
-            rag_compose stop database
+            rag_compose stop indexer database
+            ;;
+        logs)
+            [[ $# == 0 ]] || die "rag logs nu accepta argumente"
+            need_docker
+            rag_compose logs -f --tail=100 indexer
             ;;
         scan|verify|search)
             need_docker
