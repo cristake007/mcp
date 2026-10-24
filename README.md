@@ -149,9 +149,15 @@ The optional RAG tools `list_docs` (paginated index inventory) and
 independent RAG PostgreSQL and private API**. They report document ID,
 source path, parser, index timestamp, warning counts, text length, chunk
 count and embeddings. `document_status` checks stored chunk coverage
-against the extracted text and lists parser warnings. The private RAG API
-does not mount the original documents: status is **not a live source-file
-freshness check**. `source_check="not_performed"` is always explicit.
+against the extracted text and lists parser warnings. `list_docs` and `document_status` do not compare original files:
+`source_check="not_performed"` remains explicit. The new `corpus_health`
+tool checks the live `rag/documents` directory against PostgreSQL file hashes
+through a separate **read-only mount in the RAG API container**, not MCP.
+It reports `new_unindexed`, `modified`, `missing`, unsupported/oversized
+and unreadable files; global totals are complete, with paginated file entries.
+An empty mounted directory with existing index records raises an explicit
+warning, not a healthy verdict. Use `./mcpctl rag enable` after git pull to
+rebuild the private RAG API and MCP container.
 
 Examples:
 
