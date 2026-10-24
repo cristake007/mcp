@@ -133,6 +133,34 @@ produce a nonzero CLI exit code.
   avoids approximate-index recall trade-offs. New or modified documents are
   indexed automatically when the independent RAG indexer is running.
 
+## Exact statistics (full indexed corpus)
+
+The optional MCP tool `corpus_stats` counts **every indexed document**,
+**every detected legal article**, and **literal mentions** in full extracted
+text; it does not sample the first search hits. It also works without
+embeddings or an internet connection. For a direct CLI test:
+
+```bash
+cd /opt/mcp
+./mcpctl rag stats "autorizare"
+./mcpctl rag stats "autorizare" --second-term "suspendare" --mode all
+```
+
+`mode=all`: both phrases must occur in the **same document** for
+`matching_documents`, or the **same detected article** for
+`matching_articles`. They may appear in separate articles of the same
+document: document count can exceed the number of documents with matching
+articles. `mode=any` counts matches to either phrase. `occurrences_per_term`
+reports individual literal phrase counts, not the number of co-occurrences.
+
+Matching ignores case and Romanian diacritics and uses word boundaries;
+it does not infer synonyms, legal meaning or semantic equivalence. Article
+counts require recognized headings (`Art.`/`Articolul` at line start);
+documents with no recognizable article headings still count toward
+document totals. The API returns exact totals and at most 10 examples by
+default (configurable 0–20). Each article example includes document ID
+and exact source character offsets, usable with `get_text`.
+
 ## Optional MCP connection (disabled by default)
 
 **Normal MCP and normal RAG are still independent.** The bridge is an
@@ -160,10 +188,10 @@ If the Docker network already exists, skip `docker network create`. Use
 the **same token** in both projects by keeping it in `rag/.env`, supplied
 as an additional Compose env file to the MCP overlay.
 
-Only with the overlays active does MCP advertise `search_docs` and
-`get_text`. The RAG API is reachable only over the opt-in
+Only with the overlays active does MCP advertise `search_docs`,
+`get_text` and `corpus_stats` (unless individually disabled). The RAG API is reachable only over the opt-in
 `mcp-rag-link` Docker network and requires a shared bearer secret.
-The HTTP API offers only POST `/search` and POST `/text`; no document
+The HTTP API offers only read-only POST `/search`, `/text`, `/stats`; no document
 writing, admin endpoints, browser UI or public listening ports.
 
 `search_docs` returns literal indexed chunks, their source offsets,
