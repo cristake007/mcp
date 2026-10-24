@@ -38,10 +38,16 @@ def diagram_pdf(path: Path) -> None:
     pdf = Canvas(str(path), pagesize=(612, 792))
     pdf.setFont("Helvetica", 14)
     pdf.drawString(80, 718, "MANTIS overview")
-    pdf.drawImage(ImageReader(img), 88, 360, width=450, height=240)
+    control = PILImage.new("RGB", (1000, 245), "white")
+    label = ImageDraw.Draw(control)
+    label.text((45, 40), "Screen copy", fill="black", font=font)
+    label.text((45, 118), "Adjust Step", fill="black", font=font)
+    pdf.drawImage(ImageReader(control), 88, 520, width=450, height=125)
     pdf.setFont("Helvetica", 10)
-    pdf.drawString(170, 343, "Figure 4: MANTIS connectors overview")
-    pdf.drawString(80, 280, "Technical equipment documentation")
+    pdf.drawString(170, 505, "Figure 3: MANTIS front-panel buttons")
+    pdf.drawImage(ImageReader(img), 88, 245, width=450, height=225)
+    pdf.drawString(170, 231, "Figure 4: MANTIS connectors overview")
+    pdf.drawString(80, 150, "Technical equipment documentation")
     pdf.save()
 
 
@@ -54,8 +60,10 @@ class RecognitionTests(unittest.TestCase):
             diagram_pdf(source)
             figures, warnings = extract_pdf_figures(source)
             self.assertEqual(warnings, [])
-            self.assertEqual(len(figures), 1)
-            figure = figures[0]
+            self.assertEqual(len(figures), 2)
+            self.assertIn("Figure 3", figures[0]["caption"])
+            self.assertNotIn("Ethernet connector", figures[0]["ocr_text"])
+            figure = figures[1]
             self.assertEqual(figure["page"], 1)
             self.assertIn("Figure 4", figure["caption"])
             self.assertIn("MANTIS connectors", figure["caption"])
@@ -84,8 +92,8 @@ class IndexTests(unittest.TestCase):
                 self.assertEqual(first["errors"], 0)
                 docs = store.list_documents(conn)["documents"]
                 self.assertEqual(len(docs), 1)
-                self.assertEqual(docs[0]["figures"], 1)
-                self.assertEqual(docs[0]["ocr_chunks"], 1)
+                self.assertEqual(docs[0]["figures"], 2)
+                self.assertEqual(docs[0]["ocr_chunks"], 2)
                 document_id = docs[0]["document_id"]
                 raw = store.get_text(conn, document_id)[1]
                 self.assertIn("MANTIS overview", raw)
