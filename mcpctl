@@ -313,7 +313,7 @@ mcp_command() {
     case "$action" in
         start) mcp_compose up -d ;;
         stop) docker compose -f "$ROOT/compose.yaml" stop mcp ;;
-        apply) mcp_compose up -d --no-deps --force-recreate mcp ;;
+        apply) mcp_compose up -d --no-deps --build --force-recreate mcp ;;
         logs) docker compose -f "$ROOT/compose.yaml" logs -f --tail=100 mcp ;;
         *) die "Comanda mcp invalida. Foloseste: ./mcpctl help";;
     esac
