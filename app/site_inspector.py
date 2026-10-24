@@ -427,7 +427,8 @@ def inspect_site(
     get: retrieve a URL, view='raw' for HTML / ACF, view='text' for all
       visible HTML text or all ACF text fields (labeled with paths). For a large
       page request each next_part using the same max_chars and expected_hash.
-    batch_get: retrieve up to five pages per call from an explicit sitemap.
+    batch_get: up to five individual pages per call; archive /cursuri/
+      does not consume an audit slot. Offsets apply to auditable URLs.
       Optional fields=['title','acf.grup_tinta','acf.tematica'] reduces
       returned content. Without fields, all available text is kept.
       source_map identifies field paths and exact visible-text positions.
@@ -514,8 +515,9 @@ def inspect_site(
             raise ValueError("batch_get necesită un singur sitemap explicit")
         selected = _sitemap_url(sitemap, _sitemaps())
         urls = _urls(selected)
+        eligible_urls, skipped_index_urls = _index_pages_in_sitemap(selected, urls)
         batch_limit = min(limit, BATCH_MAX_PAGES)
-        current = urls[offset:offset + batch_limit]
+        current = eligible_urls[offset:offset + batch_limit]
         chars_per_page = min(max_chars, BATCH_CHARS_PER_PAGE)
         pages = []
         errors = []
@@ -533,12 +535,14 @@ def inspect_site(
         ]
         return {
             "action": action, "sitemap": selected, "total_urls": len(urls),
+            "auditable_urls": len(eligible_urls),
+            "skipped_index_urls": skipped_index_urls,
             "fields": list(selectors) if selectors is not None else None,
             "coverage": "selected" if selectors is not None else "all",
             "offset": offset, "requested_limit": limit,
             "processed": len(current), "pages": pages, "errors": errors,
-            "next_offset": next_offset if next_offset < len(urls) else None,
-            "end_of_sitemap": next_offset >= len(urls),
+            "next_offset": next_offset if next_offset < len(eligible_urls) else None,
+            "end_of_sitemap": next_offset >= len(eligible_urls),
             "batch_complete": not errors and not pending
                               and all(not p["warnings"] for p in pages),
             "pending_parts": pending,
