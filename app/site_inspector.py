@@ -419,6 +419,9 @@ def inspect_site(
     part: int = 0,
     expected_hash: str = "",
     fields: list[str] | None = None,
+    field: str = "",
+    quote: str = "",
+    reviews: list[dict] | None = None,
 ) -> dict:
     """Inspect live tuvkarpat.ro through one MCP tool.
 
@@ -436,10 +439,17 @@ def inspect_site(
       parts recoverable through get(view='text', part=...).
       Follow both next_offset and pending_parts; inspect all errors.
     search: literal case-insensitive match, maximum twenty URLs per call.
+    verify_quote: exact quotation from one field path, with character offsets.
+    audit_changes: batch_get only new/changed text since explicitly approved hashes.
+    audit_ack: explicitly acknowledge a verified batch (url + sha256), or
+      one url + expected_hash, for the requested fields. Baselines persist in
+      PostgreSQL; no read, get, batch_get or audit_changes marks content reviewed.
     Diacritics and grammar must be interpreted by the LLM, not this tool.
     """
-    if action not in ("sitemaps", "urls", "get", "batch_get", "search"):
-        raise ValueError("Acțiune invalidă: sitemaps, urls, get, batch_get, search")
+    if action not in ("sitemaps", "urls", "get", "batch_get", "search",
+                      "verify_quote", "audit_changes", "audit_ack"):
+        raise ValueError("Acțiune invalidă: sitemaps, urls, get, batch_get, "
+                         "search, verify_quote, audit_changes, audit_ack")
     if not 0 <= offset <= 100000:
         raise ValueError("offset trebuie să fie între 0 și 100000")
     if not 1 <= limit <= 100:
@@ -455,6 +465,76 @@ def inspect_site(
 
     from app.site_fields import normalize_fields, extract_with_sources, slice_sources
     selectors = normalize_fields(fields)
+
+    if action == "verify_quote":
+        if not url:
+            raise ValueError("verify_quote necesită url")
+        field_selector = normalize_fields([field])
+        if not isinstance(quote, str) or not 1 <= len(quote) <= 500:
+            raise ValueError("quote trebuie să conțină 1..500 caractere")
+        data = _read_page(url)
+        text, warnings, spans, missing = extract_with_sources(data, field_selector)
+        matches = []
+        total_matches = 0
+        for span in spans:
+            value = text[span["content_start"]:span["content_end"]]
+            cursor = 0
+            while True:
+                pos = value.find(quote, cursor)
+                if pos == -1:
+                    break
+                total_matches += 1
+                if len(matches) < 20:
+                    matches.append({
+                        "field": span["field"], "start": pos,
+                        "end": pos + len(quote),
+                        "context": value[max(0, pos - 80):min(len(value), pos + len(quote) + 80)],
+                    })
+                cursor = pos + len(quote)
+        return {
+            "action": action, "url": url, "field": field_selector[0],
+            "quote": quote, "verified": total_matches > 0,
+            "occurrences": total_matches, "matches": matches,
+            "warnings": warnings, "missing_fields": missing,
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "note": "Potrivire exactă în textul vizibil normalizat al câmpului; "
+                    "nu confirmă corectitudinea propunerii lingvistice.",
+        }
+
+    if action == "audit_ack":
+        from app.site_audit import save_reviews
+        entries = reviews if reviews is not None else [{"url": url, "sha256": expected_hash}]
+        if not isinstance(entries, list) or not 1 <= len(entries) <= 10:
+            raise ValueError("audit_ack necesită 1..10 înregistrări")
+        saved = []
+        seen = set()
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) != {"url", "sha256"}:
+                raise ValueError("Fiecare review necesită numai url și sha256")
+            item_url, checksum = entry["url"], entry["sha256"]
+            _allowed(item_url)
+            if item_url in seen:
+                raise ValueError("URL duplicat în audit_ack")
+            seen.add(item_url)
+            if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum):
+                raise ValueError("SHA-256 invalid în audit_ack")
+            data = _read_page(item_url)
+            content, warnings, _, missing = extract_with_sources(data, selectors)
+            if warnings or missing:
+                raise ValueError("Nu se poate confirma conținut incomplet: " + item_url)
+            current = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            if current != checksum:
+                raise ValueError("Conținutul s-a schimbat: " + item_url)
+            saved.append((item_url, current))
+        # This is the only operation that marks a page as reviewed.
+        save_reviews(saved, selectors)
+        return {
+            "action": action, "reviewed": len(saved),
+            "fields": list(selectors) if selectors is not None else None,
+            "coverage": "selected" if selectors is not None else "all",
+            "urls": [item_url for item_url, _ in saved],
+            "note": "Confirmare explicită; nu reprezintă validare gramaticală automată.",
+        }
 
     if action == "sitemaps":
         return {"action": action, "sitemaps": _sitemaps()}
@@ -510,22 +590,39 @@ def inspect_site(
             "truncated": chunks["next_part"] is not None,
         }
 
-    if action == "batch_get":
+    if action in ("batch_get", "audit_changes"):
         if not sitemap or sitemap == "all":
-            raise ValueError("batch_get necesită un singur sitemap explicit")
+            raise ValueError(action + " necesită un singur sitemap explicit")
         selected = _sitemap_url(sitemap, _sitemaps())
         urls = _urls(selected)
         eligible_urls, skipped_index_urls = _index_pages_in_sitemap(selected, urls)
         batch_limit = min(limit, BATCH_MAX_PAGES)
         current = eligible_urls[offset:offset + batch_limit]
         chars_per_page = min(max_chars, BATCH_CHARS_PER_PAGE)
+        if action == "audit_changes":
+            from app.site_audit import get_reviews
+            baselines = get_reviews(current, selectors)
+        else:
+            baselines = {}
         pages = []
+        unchanged = []
         errors = []
         with ThreadPoolExecutor(max_workers=3) as pool:
             futures = [pool.submit(_batch_page, item, chars_per_page, selectors) for item in current]
             for item, future in zip(current, futures):
                 try:
-                    pages.append(future.result())
+                    page = future.result()
+                    old = baselines.get(item)
+                    if (old is not None and old["sha256"] == page["sha256"]
+                            and not page["warnings"] and not page["missing_fields"]):
+                        unchanged.append({
+                            "url": item, "sha256": page["sha256"],
+                            "reviewed_at": old["reviewed_at"],
+                        })
+                    else:
+                        if action == "audit_changes":
+                            page["change_status"] = "new" if old is None else "changed"
+                        pages.append(page)
                 except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
                     errors.append({"url": item, "error": str(exc)[:300]})
         next_offset = offset + len(current)
@@ -540,7 +637,8 @@ def inspect_site(
             "fields": list(selectors) if selectors is not None else None,
             "coverage": "selected" if selectors is not None else "all",
             "offset": offset, "requested_limit": limit,
-            "processed": len(current), "pages": pages, "errors": errors,
+            "processed": len(current), "pages": pages, "unchanged": unchanged,
+            "errors": errors,
             "next_offset": next_offset if next_offset < len(eligible_urls) else None,
             "end_of_sitemap": next_offset >= len(eligible_urls),
             "batch_complete": not errors and not pending
@@ -549,7 +647,9 @@ def inspect_site(
             "note": (
                 "end_of_sitemap describes URL pagination only. "
                 "Do not claim an exhaustive audit until all batches, errors "
-                "and pending parts have been reviewed. HTML is not JS-rendered."
+                "and pending parts have been reviewed. HTML is not JS-rendered. "
+                "Only audit_ack explicitly marks pages reviewed; unchanged "
+                "means unchanged since that exact field selection was approved."
             ),
         }
 
