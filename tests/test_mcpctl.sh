@@ -45,12 +45,19 @@ ctl user enable admin@example.com
 grep -q 'app.manage enable-user admin@example.com' "$TMP/docker.log"
 ctl user disable admin@example.com
 grep -q 'app.manage disable-user admin@example.com' "$TMP/docker.log"
+ctl rag start
+grep -q 'up -d --build database indexer' "$TMP/docker.log"
+ctl rag logs
+grep -q 'logs -f --tail=100 indexer' "$TMP/docker.log"
 ctl rag enable
+grep -q 'up -d --build indexer api' "$TMP/docker.log"
 [[ -f "$TMP/.mcp-rag-enabled" ]]
 test -n "$(grep '^RAG_API_TOKEN=' "$TMP/rag/.env")"
 ctl tools list | grep -q 'get_text.*enabled'
 ctl rag disable
 [[ ! -f "$TMP/.mcp-rag-enabled" ]]
+ctl rag stop
+grep -q 'stop indexer database' "$TMP/docker.log"
 ctl tools list | grep -q 'get_text.*unavailable'
 grep -qx 'POSTGRES_PASSWORD=CI_SECRET' "$TMP/.env"
 grep -qx 'RAG_DB_PASSWORD=CI_RAG_PASSWORD' "$TMP/rag/.env"
