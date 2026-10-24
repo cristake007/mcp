@@ -1,5 +1,6 @@
 """Optional CPU embeddings; no LLM server, API key, or permanent model process."""
 import math
+from functools import lru_cache
 import os
 
 MODEL_ID = "intfloat/multilingual-e5-small"
@@ -43,3 +44,9 @@ class Embedder:
         if len(vectors) != len(values):
             raise RuntimeError("Embedding count mismatch")
         return vectors
+
+
+@lru_cache(maxsize=1)
+def cached_embedder() -> Embedder:
+    """Avoid reloading the ONNX model on every HTTP search request."""
+    return Embedder()
