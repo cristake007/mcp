@@ -57,6 +57,49 @@ class ParserTests(unittest.TestCase):
             self.assertIn("Antet ISO", parsed.raw_text)
             self.assertTrue(any(x.source.get("kind") == "docx_cell" for x in parsed.units))
 
+    def test_powerpoint_slides_tables_and_speaker_notes(self):
+        from pptx import Presentation
+        from pptx.util import Inches
+
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "training.pptx"
+            presentation = Presentation()
+            first = presentation.slides.add_slide(presentation.slide_layouts[6])
+            first.shapes.add_textbox(Inches(1), Inches(1), Inches(6), Inches(1)).text = (
+                "ISO 9001:2015 - Articolul 15"
+            )
+            table = first.shapes.add_table(
+                2, 2, Inches(1), Inches(2), Inches(6), Inches(2)
+            ).table
+            table.cell(0, 0).text = "Obligatie"
+            table.cell(0, 1).text = "10 ani"
+            table.cell(1, 0).text = "Termen"
+            table.cell(1, 1).text = "24.5"
+            first.notes_slide.notes_text_frame.text = "Notite: se pastreaza 10 ani."
+            second = presentation.slides.add_slide(presentation.slide_layouts[6])
+            second.shapes.add_textbox(Inches(1), Inches(1), Inches(6), Inches(1)).text = (
+                "A doua pagina - ISO 14001"
+            )
+            presentation.save(path)
+
+            parsed = parse_file(path)
+            self.assertEqual(parsed.parser, "python-pptx")
+            for value in ["ISO 9001:2015", "10 ani", "24.5", "Notite:", "ISO 14001"]:
+                self.assertIn(value, parsed.raw_text)
+            sources = [unit.source for unit in parsed.units]
+            self.assertTrue(any(x.get("kind") == "pptx_text" and x.get("slide") == 1 for x in sources))
+            self.assertTrue(any(x.get("kind") == "pptx_table_cell"
+                                and x.get("row") == 1 and x.get("column") == 2
+                                and x.get("slide") == 1 for x in sources))
+            self.assertTrue(any(x.get("kind") == "pptx_notes" and x.get("slide") == 1
+                                for x in sources))
+            self.assertTrue(any(x.get("kind") == "pptx_text" and x.get("slide") == 2
+                                for x in sources))
+            chunks = make_chunks(parsed.raw_text, parsed.units, max_chars=40, overlap=8)
+            verify_coverage(parsed.raw_text, chunks)
+            self.assertTrue(all(chunk.text == parsed.raw_text[chunk.start:chunk.end]
+                                for chunk in chunks))
+
     def test_excel_preserves_cell_coordinates_and_formulas(self):
         from openpyxl import Workbook
 
