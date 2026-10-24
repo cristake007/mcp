@@ -7,3 +7,4 @@ openpyxl==3.1.5
 fastembed==0.9.0
 starlette==0.48.0
 uvicorn==0.37.0
+snowballstemmer==3.1.1
