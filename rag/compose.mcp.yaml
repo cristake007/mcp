@@ -1,0 +1,30 @@
+# Optional bridge ONLY. Normal rag/compose.yaml never starts this API.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: ["python", "-m", "ragcore.api"]
+    environment:
+      PGHOST: database
+      PGPORT: "5432"
+      PGDATABASE: rag
+      PGUSER: rag
+      PGPASSWORD: ${RAG_DB_PASSWORD:?Set RAG_DB_PASSWORD in rag/.env}
+      RAG_EMBEDDINGS_ENABLED: ${RAG_EMBEDDINGS_ENABLED:-1}
+      RAG_API_TOKEN: ${RAG_API_TOKEN:?Set RAG_API_TOKEN in rag/.env}
+      FASTEMBED_CACHE_PATH: /model-cache
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      OMP_NUM_THREADS: "2"
+    volumes:
+      - model_cache:/model-cache
+    networks: [rag_private, mcp_rag_link]
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  mcp_rag_link:
+    external: true
+    name: mcp-rag-link
