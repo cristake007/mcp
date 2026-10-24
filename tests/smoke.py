@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-from app.manage import set_user, disable_user, cleanup, list_clients
+from app.manage import set_user, disable_user, enable_user, cleanup, list_clients
 from app.db import connection, init_db
 from app.oauth import digest, approved_redirect
 from app.http_security import same_resource
@@ -315,6 +315,15 @@ async def main():
                 "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
             })
             assert rejected.status_code in (401, 403), (rejected.status_code, rejected.text)
+            await enable_user("oauth-smoke@example.org")
+            async with connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT active FROM users WHERE email=%s",
+                        ("oauth-smoke@example.org",),
+                    )
+                    user = await cur.fetchone()
+                    assert user and user["active"], user
 
     await cleanup()
     print("PASS: OAuth discovery, DCR, redirect allowlist, PKCE, login, token issuance, one-use code, MCP, refresh, revocation")
