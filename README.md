@@ -230,7 +230,7 @@ audience rejection, refresh and HTTP guards.
 An **independent, opt-in** document indexing project lives in [rag/](rag/README.md).
 Its Docker Compose project, PostgreSQL database, dependencies and files are
 separate. Root `docker compose up -d` starts **only MCP**, never RAG.
-There is no current MCP↔RAG integration.
+An **optional** bridge can expose `search_docs` and `get_text` when explicitly\nenabled with `compose.rag.yaml` and `rag/compose.mcp.yaml`. Normal MCP\nstartup contains neither integration nor additional RAG dependencies.\nSee [RAG instructions](rag/README.md#optional-mcp-connection-disabled-by-default).
 
 ## Security / readiness
 
