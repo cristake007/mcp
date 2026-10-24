@@ -2,3 +2,4 @@ fastmcp==4.1.0
 psycopg[binary]==3.2.10
 argon2-cffi==25.1.0
 uvicorn==0.37.0
+beautifulsoup4==4.14.2
