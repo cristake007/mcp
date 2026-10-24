@@ -385,5 +385,114 @@ class SiteInspectorTests(unittest.TestCase):
 
 
 
+    def test_verify_quote_is_exact_and_reports_source_field(self):
+        url = "https://tuvkarpat.ro/cursuri/test/"
+        page = {"url": url, "format": "acf_json", "title": "Verificare",
+                "acf": {"tematica": ["Acord corect", "în conformitate cu cerințelor"],
+                        "grup_tinta": "Alți angajați"}}
+        with patch.object(site, "_read_page", return_value=page):
+            result = site.inspect_site(
+                "verify_quote", url=url, field="acf.tematica",
+                quote="în conformitate cu cerințelor")
+            self.assertTrue(result["verified"])
+            self.assertEqual(result["occurrences"], 1)
+            self.assertEqual(result["matches"][0]["field"], "acf.tematica[1]")
+            self.assertEqual(result["matches"][0]["start"], 0)
+            self.assertIn("cerințelor", result["matches"][0]["context"])
+            not_found = site.inspect_site(
+                "verify_quote", url=url, field="acf.tematica",
+                quote="În conformitate cu cerințelor")
+            self.assertFalse(not_found["verified"])
+            absent = site.inspect_site(
+                "verify_quote", url=url, field="acf.altceva", quote="test")
+            self.assertEqual(absent["missing_fields"], ["acf.altceva"])
+        with self.assertRaises(ValueError):
+            site.inspect_site("verify_quote", url=url, field="acf.tematica", quote="")
+
+    def test_verify_quote_on_cleaned_html(self):
+        url = "https://tuvkarpat.ro/industriale/test/"
+        page = {"url": url, "format": "page_html",
+                "html": "<main><p>Pregatirea auditorilor</p></main>"}
+        with patch.object(site, "_read_page", return_value=page):
+            got = site.inspect_site(
+                "verify_quote", url=url, field="html.body",
+                quote="Pregatirea auditorilor")
+        self.assertTrue(got["verified"])
+        self.assertEqual(got["matches"][0]["field"], "html.body")
+
+    def test_incremental_only_sends_new_or_modified_content(self):
+        import hashlib
+        from app.site_fields import extract_with_sources, normalize_fields
+        from unittest.mock import Mock
+        sitemap = "https://tuvkarpat.ro/cursuri-sitemap.xml"
+        urls = ["https://tuvkarpat.ro/cursuri/prima/",
+                "https://tuvkarpat.ro/cursuri/alta/"]
+        pages = {url: {"url": url, "format": "acf_json", "title": "Curs",
+                       "acf": {"tematica": "Text auditat"}} for url in urls}
+        selectors = normalize_fields(["title", "acf.tematica"])
+        content, _, _, _ = extract_with_sources(pages[urls[0]], selectors)
+        sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        with (patch.object(site, "_sitemaps", return_value=[sitemap]),
+              patch.object(site, "_urls", return_value=urls),
+              patch.object(site, "_read_page", side_effect=lambda u: pages[u]),
+              patch("app.site_audit.get_reviews",
+                    return_value={urls[0]: {"sha256": sha, "reviewed_at": "2026-10-24T10:00:00+00:00"}}) as get_review,
+              patch("app.site_audit.save_reviews") as save_review):
+            got = site.inspect_site(
+                "audit_changes", sitemap="cursuri-sitemap.xml",
+                fields=["title", "acf.tematica"])
+            self.assertEqual(got["processed"], 2)
+            self.assertEqual([x["url"] for x in got["unchanged"]], [urls[0]])
+            self.assertEqual([x["url"] for x in got["pages"]], [urls[1]])
+            self.assertEqual(got["pages"][0]["change_status"], "new")
+            self.assertTrue(got["batch_complete"])
+            get_review.assert_called_once_with(urls, selectors)
+            save_review.assert_not_called()
+
+    def test_audit_ack_requires_current_exact_hash_and_is_explicit(self):
+        import hashlib
+        from app.site_fields import extract_with_sources, normalize_fields
+        url = "https://tuvkarpat.ro/cursuri/exemplu/"
+        page = {"url": url, "format": "acf_json", "title": "Curs",
+                "acf": {"tematica": "Munca și muncă"}}
+        selectors = normalize_fields(["title", "acf.tematica"])
+        content, _, _, _ = extract_with_sources(page, selectors)
+        sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        with (patch.object(site, "_read_page", return_value=page),
+              patch("app.site_audit.save_reviews") as save_review):
+            result = site.inspect_site(
+                "audit_ack", fields=["title", "acf.tematica"],
+                reviews=[{"url": url, "sha256": sha}])
+            self.assertEqual(result["reviewed"], 1)
+            save_review.assert_called_once_with([(url, sha)], selectors)
+            save_review.reset_mock()
+            with self.assertRaisesRegex(ValueError, "schimbat"):
+                site.inspect_site(
+                    "audit_ack", url=url, expected_hash="0"*64,
+                    fields=["title", "acf.tematica"])
+            save_review.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "duplicat"):
+                site.inspect_site(
+                    "audit_ack", fields=["title", "acf.tematica"],
+                    reviews=[{"url": url, "sha256": sha}, {"url": url, "sha256": sha}])
+            save_review.assert_not_called()
+
+    def test_audit_ack_rejects_missing_fields_and_invalid_batch(self):
+        url = "https://tuvkarpat.ro/cursuri/exemplu/"
+        page = {"url": url, "format": "acf_json", "title": "Curs",
+                "acf": {"tematica": "Text"}}
+        with (patch.object(site, "_read_page", return_value=page),
+              patch("app.site_audit.save_reviews") as save_review):
+            with self.assertRaisesRegex(ValueError, "incomplet"):
+                site.inspect_site(
+                    "audit_ack", url=url, expected_hash="0"*64,
+                    fields=["acf.grup_tinta"])
+            save_review.assert_not_called()
+            with self.assertRaises(ValueError):
+                site.inspect_site("audit_ack", reviews=[{"url": url}])
+            save_review.assert_not_called()
+
+
+
 if __name__ == "__main__":
     unittest.main()
