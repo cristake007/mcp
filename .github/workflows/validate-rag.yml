@@ -58,6 +58,7 @@ jobs:
     env:
       RAG_DB_PASSWORD: ci-only-rag-secret
       RAG_EMBEDDINGS_ENABLED: "0"
+      RAG_API_TOKEN: docker-test-long-secret-0123456789abcdef
     steps:
       - uses: actions/checkout@v4
       - name: Prepare sample documents
@@ -75,6 +76,40 @@ jobs:
           docker compose -f rag/compose.yaml run --rm cli verify
           docker compose -f rag/compose.yaml run --rm cli status
           docker compose -f rag/compose.yaml run --rm cli search --lexical-only 'ISO 9001' | grep -F subfolder/procedure.txt
+      - name: Exercise token-protected optional RAG API over Docker network
+        run: |
+          docker network create mcp-rag-link
+          docker compose -f rag/compose.yaml -f rag/compose.mcp.yaml up -d api
+          docker compose -f rag/compose.yaml -f rag/compose.mcp.yaml run --rm -T -e RAG_API_TOKEN --entrypoint python cli - <<'PY'
+          import json
+          import os
+          from urllib.error import HTTPError
+          from urllib.request import Request, urlopen
+
+          def call(route, payload, token):
+              request = Request(
+                  "http://api:8080" + route,
+                  data=json.dumps(payload).encode(),
+                  method="POST",
+                  headers={"Content-Type": "application/json",
+                           "Authorization": "Bearer " + token},
+              )
+              with urlopen(request, timeout=15) as response:
+                  return json.load(response)
+
+          try:
+              call("/search", {"query": "ISO 9001"}, "wrong-secret")
+              raise AssertionError("API must reject wrong tokens")
+          except HTTPError as exc:
+              assert exc.code == 401, exc.code
+          token = os.environ["RAG_API_TOKEN"]
+          results = call("/search", {"query": "ISO 9001"}, token)["results"]
+          assert results and results[0]["path"] == "subfolder/procedure.txt", results
+          item = results[0]
+          data = call("/text", {"document_id": item["document_id"]}, token)
+          assert data["exact"] and "ISO 9001" in data["text"], data
+          print("PASS: standalone authenticated RAG API")
+          PY
       - name: Stop RAG stack
         if: always()
-        run: docker compose -f rag/compose.yaml down
+        run: docker compose -f rag/compose.yaml -f rag/compose.mcp.yaml down
