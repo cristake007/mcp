@@ -293,6 +293,43 @@ The first OCR pass over a large illustrated manual can use CPU for several
 minutes; the indexer remains single-process and non-destructive. The API
 never runs OCR per user question.
 
+### Interactive RAG viewer in ChatGPT (MCP Apps)
+
+The optional MCP stack now exposes **`show_rag_sources`**, a renderer tool
+that opens a small, read-only HTML interface inside MCP Apps-capable clients
+such as ChatGPT. The original search and image tools remain independent;
+text-only clients receive structured/text results normally.
+
+- `show_rag_sources(query="Ce conectori are MANTIS?")`: searches the
+  **local RAG only**, selects up to four grounded PDF pages, and opens the
+  page viewer automatically when the MCP host supports Apps.
+- `show_rag_sources(document_id=N, page=P)`: opens a specific indexed PDF
+  page, using IDs returned by `search_docs` (never invented).
+- The viewer shows document names, captions, OCR snippets, zoom, and previous/
+  next page navigation. This interface is static, bundled with the MCP image,
+  and does not load any script, stylesheet, font or image from the Internet.
+- The app-only tool `get_rag_page_data` transfers JPEG bytes from the
+  authenticated private `/page-image` RAG API. The API verifies the indexed
+  PDF SHA-256 before rendering every page; no static public document URL,
+  direct UI access to PostgreSQL, or PDF parsing by the model/client is used.
+- The HTML resource is `ui://rag/document-viewer/v1.html` with MIME type
+  `text/html;profile=mcp-app`, linked by `_meta.ui.resourceUri`. Other
+  clients continue to use `search_docs` and `get_page_image`.
+
+**Limitations:** ChatGPT must choose the `show_rag_sources` tool (or you
+select the MCP connector explicitly). The server cannot guarantee model
+tool selection, prevent web browsing elsewhere, or require the client to
+render an iframe. The view displays **full original PDF pages**, not cropped
+figures, and its suggested pages may include imperfect OCR matches. It
+does not alter indexed document data or existing search rankings.
+
+Refresh tools after restarting the MCP server to discover
+`show_rag_sources`. If the MCP Apps view is not supported or a UI call
+fails, request the normal `get_page_image` tool or inspect source metadata.
+Disable both viewer tools if you don't want this UI:
+`./mcpctl tools disable show_rag_sources` and
+`./mcpctl tools disable get_rag_page_data`.
+
 ### Images from indexed PDF manuals: `get_page_image`
 
 PDF search results from `search_docs` already include source `locations`
