@@ -193,11 +193,11 @@ the **same token** in both projects by keeping it in `rag/.env`, supplied
 as an additional Compose env file to the MCP overlay.
 
 Only with the overlays active does MCP advertise `search_docs`,
-`get_text`, `corpus_stats`, `list_docs` and `document_status`
+`get_text`, `corpus_stats`, `list_docs`, `document_status` and `corpus_health`
 (unless individually disabled). The RAG API is reachable only over the opt-in
 `mcp-rag-link` Docker network and requires a shared bearer secret.
 The HTTP API offers only read-only POST `/search`, `/text`, `/stats`,
-`/documents`, `/document-status`; no document
+`/documents`, `/document-status`, `/corpus-health`; no document
 writing, admin endpoints, browser UI or public listening ports.
 
 `search_docs` returns literal indexed chunks, their source offsets,
@@ -224,11 +224,54 @@ the recorded model. It also lists all extraction warnings. Results indicate
 `indexed_complete`, `incomplete`, or `empty`; extraction warnings are
 reported separately and need examination.
 
-These tools use the isolated RAG API and PostgreSQL, not the original files.
-The API deliberately has **no source-document mount**. Therefore
-`source_check="not_performed"` means that an `indexed_complete` result
-**cannot guarantee** the original file has not changed since indexing.
+The `list_docs` and `document_status` tools inspect only PostgreSQL.
+They do not compare original files. The independent `corpus_health` tool
+performs that comparison separately using a **read-only** document mount
+available only inside the optional RAG API container, never MCP itself.
+`source_check="not_performed"` for `document_status` remains accurate.
 Automatic scanning is performed separately by the independent indexer.
+
+### Source directory versus PostgreSQL: `corpus_health`
+
+`corpus_health(offset=0, limit=50)` compares every supported original file
+recursively in `rag/documents` with the PostgreSQL `rag_documents` table.
+It reads filesystem bytes to calculate SHA-256 and compares with the hash
+saved at indexing time. It performs **no indexing, deletion or write**.
+
+The result includes **global exhaustive counts** in `summary` and
+paginated file details in `files` (follow `next_offset`):
+
+- `current`: exact content hash matches indexed source hash.
+- `new_unindexed`: supported file exists, but there is no index row.
+- `modified`: file exists, but differs from the indexed source hash.
+- `missing`: PostgreSQL entry exists, but the source file is absent.
+- `unsupported`, `oversized`, `unreadable`, `ignored_symlink`:
+  files requiring attention, not silently counted as successfully indexed.
+
+`summary.new_files` and `summary.unindexed_files` both count the **same**
+`new_unindexed` documents; do not add them together. File additions with
+unsupported extensions are shown separately. The `status` is `healthy`
+only when no differences/errors were detected. An unexpectedly empty source
+directory with a nonempty index produces
+`source_directory_empty_check_mount`, **not** a healthy or definitely
+deleted corpus. A missing source-directory mount fails explicitly.
+
+This is a **best-effort live comparison**, not an atomic snapshot between the
+filesystem and PostgreSQL: a concurrent indexer can change state during the
+scan. Re-run after indexing settles for a stable result. The scan reports
+source freshness and inventory coverage; `document_status` separately
+checks extracted-text/chunk fidelity and parser warnings. The RAG API has
+read-only access to `./documents:/documents:ro`; the MCP container never
+receives this mount. The original documents stay untouched.
+
+Example MCP call:
+
+```json
+{"offset":0,"limit":50}
+```
+
+Use the returned `summary` to see whether any documents are unindexed or
+outdated; follow `next_offset` to list every affected path.
 
 After updating RAG source code, run `./mcpctl rag enable` from the repository
 root if the bridge is active. It rebuilds the private RAG API **and** the MCP
