@@ -16,9 +16,11 @@ async def main() -> None:
     assert "ui/initialize" in html and "ui/notifications/tool-result" in html
     assert "get_rag_page_data" in html and "data:image/jpeg;base64," in html
     assert "<iframe" not in html.lower() and "fetch(" not in html.lower()
-    assert "togglePage" in html and "figure_id" in html
-    assert "document.createElement" in html
-    assert "textContent" in html and "innerHTML" not in html
+    assert "figure_id" in html and "cropped_original_pdf_figure" in html
+    assert "<button" not in html and "<header" not in html
+    assert "<details" not in html and "zoom" not in html.lower()
+    assert "document.createElement" not in html and "innerHTML" not in html
+    assert html.count("<img ") == 1
 
     sample = [
         {"document_id": 8, "path": "manual/MANTIS.pdf",
@@ -26,27 +28,38 @@ async def main() -> None:
          "figure": {"figure_id": 12, "page": 12, "caption": "Figure 4 MANTIS connectors"},
          "ocr_confidence": 87.3, "locations": [{"kind": "pdf_ocr", "page": 12}]},
         {"document_id": 8, "path": "manual/MANTIS.pdf",
+         "source_type": "ocr_figure", "content": "MANTIS front-panel buttons",
+         "figure": {"figure_id": 11, "page": 12,
+                    "caption": "Figure 3 MANTIS front-panel buttons"},
+         "locations": [{"kind": "pdf_ocr", "page": 12}]},
+        {"document_id": 10, "path": "manual/features.pdf",
+         "source_type": "ocr_figure", "content": "Rechercher dans: Dossier de fichiers",
+         "figure": {"figure_id": 383, "page": 6, "caption": ""},
+         "locations": [{"kind": "pdf_ocr", "page": 6}]},
+        {"document_id": 8, "path": "manual/MANTIS.pdf",
          "source_type": "original_text", "content": "Ethernet cable",
          "locations": [{"kind": "pdf_page", "page": 12}]},
         {"document_id": 9, "path": "manual/test.pdf",
          "source_type": "original_text", "content": "Activation online",
          "locations": [{"kind": "pdf_page", "page": 22}]},
     ]
-    selected = prepare_sources(sample, 4)
-    assert len(selected["sources"]) == 3
+    selected = prepare_sources(sample, 4, "Ce conectori are aparatul MANTIS?")
+    assert len(selected["sources"]) == 5
     assert len(selected["pages"]) == 1
     assert selected["pages"][0]["caption"] == "Figure 4 MANTIS connectors"
     assert selected["pages"][0]["figure_id"] == 12
     assert selected["pages"][0]["source_type"] == "ocr_figure"
-    # Unrelated text hits cannot replace the figure preview.
-    assert all(p["figure_id"] is not None for p in selected["pages"])
+    # No buttons figure, screenshot of folders, or general text allowed.
+    assert all(p["figure_id"] == 12 for p in selected["pages"])
+    assert prepare_sources(sample, 6, "Ce conectori are aparatul MANTIS?")["pages"] == selected["pages"]
+    assert prepare_sources(sample, 4, "informații despre o temă inexistentă")["pages"] == []
 
     jpeg = bytes.fromhex("ffd8ffd9")
     encoded = base64.b64encode(jpeg).decode()
 
     def request(path, payload):
         if path == "/search":
-            assert payload == {"query": "MANTIS conectori", "limit": 12}
+            assert payload == {"query": "Ce conectori are aparatul MANTIS?", "limit": 12}
             return {"results": sample}
         if path == "/figures":
             assert payload == {"document_id": 8, "page": 12}
@@ -85,7 +98,7 @@ async def main() -> None:
     assert len(found) == 1, resources
     assert found[0].mime_type == VIEWER_MIME, found[0]
 
-    plain = await tools["show_rag_sources"].run({"query": "MANTIS conectori"})
+    plain = await tools["show_rag_sources"].run({"query": "Ce conectori are aparatul MANTIS?", "max_pages": 6})
     assert plain.structured_content["pages"][0]["page"] == 12, plain
     assert plain.structured_content["pages"][0]["figure_id"] == 12, plain
     assert plain.structured_content["source_policy"] == "local_rag_only"
@@ -99,14 +112,15 @@ async def main() -> None:
     inferred = await tools["show_rag_sources"].run(
         {"document_id": 8, "page": 12},
     )
-    assert len(inferred.structured_content["pages"]) == 2
-    assert [item["figure_id"] for item in inferred.structured_content["pages"]] == [11, 12]
-    assert all(item["figure_id"] for item in inferred.structured_content["pages"])
+    # Multiple figures on a page are ambiguous unless figure_id is grounded.
+    assert inferred.structured_content["pages"] == []
 
-    picture = await tools["get_rag_page_data"].run({"document_id": 8, "page": 12})
-    assert picture.structured_content["source_verified"]
-    assert picture.structured_content["image_base64"] == encoded
-    assert picture.structured_content["total_pages"] == 186
+    # Full-page transport is prohibited even if directly requested.
+    try:
+        await tools["get_rag_page_data"].run({"document_id": 8, "page": 12})
+        raise AssertionError("Page-only transport unexpectedly succeeded")
+    except Exception as exc:
+        assert not isinstance(exc, AssertionError)
     figure = await tools["get_rag_page_data"].run(
         {"document_id": 8, "page": 12, "figure_id": 12},
     )
