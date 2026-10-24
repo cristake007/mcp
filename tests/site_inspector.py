@@ -232,5 +232,104 @@ class SiteInspectorTests(unittest.TestCase):
                 site.inspect_site("batch_get", sitemap="other-sitemap.xml")
 
 
+    def test_fields_selector_is_optional_and_structured(self):
+        from app.site_fields import normalize_fields, extract_with_sources
+        self.assertIsNone(normalize_fields(None))
+        self.assertEqual(normalize_fields(["title", "tematica", "acf.grup_tinta"]),
+                         ("title", "acf.tematica", "acf.grup_tinta"))
+        for invalid in ([], ["acf."], ["title;drop table"], ["acf.tematica.*"]):
+            with self.assertRaises(ValueError):
+                normalize_fields(invalid)
+        page = {
+            "format": "acf_json", "title": "Buna practică",
+            "acf": {"tematica": ["Pregateste elevii", "<p>Învață sudură</p>"],
+                    "grup_tinta": "Specialiști", "investitie": "100 lei",
+                    "custom": {"nested": "Text necunoscut"}},
+        }
+        text, warnings, spans, missing = extract_with_sources(
+            page, normalize_fields(["title", "acf.tematica", "grup_tinta"])
+        )
+        self.assertFalse(warnings)
+        self.assertFalse(missing)
+        self.assertIn("Pregateste elevii", text)
+        self.assertIn("Învață sudură", text)
+        self.assertNotIn("investitie", text)
+        self.assertNotIn("Text necunoscut", text)
+        self.assertEqual(
+            [s["field"] for s in spans],
+            ["title", "acf.tematica[0]", "acf.tematica[1]", "acf.grup_tinta"]
+        )
+        for span in spans:
+            self.assertEqual(len(text[span["content_start"]:span["content_end"]]),
+                             span["end"] - span["start"])
+        _, _, _, missing = extract_with_sources(page, normalize_fields(["acf.inexistent"]))
+        self.assertEqual(missing, ["acf.inexistent"])
+
+    def test_batch_selected_fields_chunk_positions_and_exact_continuation(self):
+        from app.site_fields import normalize_fields, extract_with_sources
+        url = "https://tuvkarpat.ro/cursuri/test/"
+        page = {"format": "acf_json", "url": url, "id": 12, "title": "Curs",
+                "acf": {"tematica_descriere": "<p>" + "Învățare profesională. " * 350 + "</p>",
+                        "investitie": "200 lei", "grup_tinta": "Auditori"}}
+        fields = ["title", "acf.tematica_descriere"]
+        with (
+            patch.object(site, "_sitemaps", return_value=["https://tuvkarpat.ro/cursuri-sitemap.xml"]),
+            patch.object(site, "_urls", return_value=[url]),
+            patch.object(site, "_read_page", return_value=page),
+        ):
+            batch = site.inspect_site(
+                "batch_get", sitemap="cursuri-sitemap.xml", limit=5,
+                max_chars=1000, fields=fields
+            )
+            item = batch["pages"][0]
+            self.assertEqual(batch["coverage"], "selected")
+            self.assertNotIn("200 lei", item["content"])
+            self.assertEqual(item["retrieve_remaining"]["fields"],
+                             ["title", "acf.tematica_descriere"])
+            parts = [item]
+            nxt = item["next_part"]
+            while nxt is not None:
+                page_part = site.inspect_site(
+                    "get", url=url, view="text", part=nxt, max_chars=1000,
+                    expected_hash=item["sha256"], fields=fields
+                )
+                parts.append(page_part)
+                nxt = page_part["next_part"]
+            expected_text, _, expected_spans, _ = extract_with_sources(
+                page, normalize_fields(fields)
+            )
+            self.assertEqual("".join(p["content"] for p in parts), expected_text)
+            full_by_field = {
+                s["field"]: expected_text[s["content_start"]:s["content_end"]]
+                for s in expected_spans
+            }
+            for part in parts:
+                for span in part["source_map"]:
+                    observed = part["content"][span["content_start"]:span["content_end"]]
+                    self.assertEqual(
+                        observed,
+                        full_by_field[span["field"]][span["start"]:span["end"]]
+                    )
+            with self.assertRaisesRegex(ValueError, "schimbat"):
+                site.inspect_site(
+                    "get", url=url, view="text", part=1, max_chars=1000,
+                    expected_hash=item["sha256"], fields=["acf.investitie"]
+                )
+
+    def test_full_acf_coverage_by_default_and_reject_fields_for_raw(self):
+        url = "https://tuvkarpat.ro/cursuri/test/"
+        page = {"url": url, "format": "acf_json",
+                "title": "Test", "acf": {"investitie": "400 lei", "tematica": "Pregătire"}}
+        with patch.object(site, "_read_page", return_value=page):
+            got = site.inspect_site("get", url=url, view="text")
+            self.assertEqual(got["coverage"], "all")
+            self.assertIn("400 lei", got["content"])
+            self.assertIn("Pregătire", got["content"])
+            self.assertEqual([x["field"] for x in got["source_map"]],
+                             ["title", "acf.investitie", "acf.tematica"])
+            with self.assertRaisesRegex(ValueError, "view"):
+                site.inspect_site("get", url=url, fields=["title"])
+
+
 if __name__ == "__main__":
     unittest.main()
