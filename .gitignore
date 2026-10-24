@@ -9,3 +9,6 @@ __pycache__/
 
 # RAG source documents are private; never commit them.
 rag/documents/
+
+# Bash harness local runtime state.
+.mcp-rag-enabled
