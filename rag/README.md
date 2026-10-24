@@ -2,8 +2,7 @@
 
 This directory is a **separate Docker Compose project** (`mcp-rag`).
 Nothing in the root MCP `compose.yaml`, `app/`, `Dockerfile`, environment
-or database is used or changed by RAG. There is **no MCP tool or API** here
-and no web UI. The RAG stack exposes **no host ports**. It has its own
+or database is used or changed by RAG. There is no mandatory MCP connection and no web UI. A private API is optional. The RAG stack exposes **no host ports**. It has its own
 PostgreSQL 18 + pgvector database, private Docker network and named volumes.
 
 ## Prepare, from the server
@@ -32,7 +31,46 @@ rag/documents/
         └── ghid.md
 ```
 
-Files are mounted read-only into the CLI container and are ignored by Git.
+Files are mounted read-only into the indexer and CLI containers and ignored by Git.
+
+## Automatic indexing (recommended)
+
+Start the standalone RAG service from the repository root:
+
+```bash
+cd /opt/mcp
+./mcpctl rag start
+./mcpctl rag logs
+```
+
+After that, just add PDF, DOCX, PPTX, XLSX, TXT or Markdown files to
+`/opt/mcp/rag/documents/` (subfolders are supported). The independent Docker
+`indexer` scans recursively every **60 seconds** and updates PostgreSQL +
+embeddings automatically. MCP does not need to be running or connected.
+
+New files must be unchanged across two scans, and have a modification time
+at least **20 seconds old**. Most files appear within 1–2 minutes. Parser
+errors are logged and retried. A partially copied or changed file does not
+replace its last valid indexed version. For long-running copies, prefer
+uploading to a temporary filename and renaming it into place when complete.
+
+Deleted files are automatically removed from the index after two consistent
+folder snapshots; as a safety guard an **empty** documents folder never
+triggers a mass deletion. Set `RAG_AUTO_PRUNE=0` to disable automatic deletion.
+
+Optional settings in `rag/.env` (Compose defaults work without adding them):
+
+```dotenv
+RAG_SCAN_INTERVAL_SECONDS=60
+RAG_SETTLE_SECONDS=20
+RAG_AUTO_PRUNE=1
+```
+
+Run `./mcpctl rag start` again after changing these settings. Use
+`./mcpctl rag stop` to stop the indexer and its database (after disconnecting
+the optional MCP bridge, if it is active).
+
+### Manual diagnostics (optional)
 
 ## First run
 
@@ -93,7 +131,7 @@ produce a nonzero CLI exit code.
   with RRF. Model uses `passage:` and `query:` prefixes.
 - No approximate pgvector index for this small corpus; exact cosine search
   avoids approximate-index recall trade-offs. New or modified documents are
-  processed only on explicit scan, never in a background process.
+  indexed automatically when the independent RAG indexer is running.
 
 ## Optional MCP connection (disabled by default)
 
@@ -137,8 +175,8 @@ stored text by document ID with optional `start`/`end` or `article`
 (e.g. `"Art. 34"`). Ambiguous/repeated article numbers require offsets.
 HTTP text output is limited to 25,000 characters per call.
 
-There is no automatic shared-secret or model provisioner. Index documents
-from this RAG project's CLI as before. The internal API loads the local
+There is no automatic shared-secret provisioner. Documents are indexed
+by the separate RAG indexer when running. The internal API loads the local
 embeddings model into RAM when semantic queries first arrive, and keeps it
 for repeated searches. If the API is stopped, MCP's other tools still work.
 
