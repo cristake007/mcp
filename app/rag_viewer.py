@@ -17,42 +17,52 @@ VIEWER_PATH = Path(__file__).with_name("rag_viewer.html")
 
 
 def prepare_sources(results: list[dict], max_pages: int) -> dict:
-    """Keep context and diversify pages; never pretend that a hit verifies a PDF."""
-    items = []
-    pages = []
-    seen = set()
+    """Prefer actual indexed figures, never open whole PDFs by default.
+
+    Original text remains in sources as evidence, but an unillustrated text
+    chunk must not override the related figure or trigger an unsolicited
+    multi-page PDF viewer.
+    """
+    sources, figures, pages = [], [], []
+    seen_figures, seen_pages = set(), set()
     for record in results[:12]:
-        source = record.get("locations") or []
+        locations = record.get("locations") or []
         figure = record.get("figure") or {}
-        page = figure.get("page")
-        if not page:
-            page = next((loc.get("page") for loc in source
-                         if loc.get("kind") in ("pdf_page", "pdf_ocr")
-                         and type(loc.get("page")) is int), None)
-        document_id = record.get("document_id")
-        path = record.get("path")
+        page = figure.get("page") or next(
+            (loc.get("page") for loc in locations
+             if loc.get("kind") in ("pdf_page", "pdf_ocr")
+             and type(loc.get("page")) is int), None
+        )
+        document_id, path = record.get("document_id"), record.get("path")
         if type(document_id) is not int or not isinstance(path, str):
             continue
-        caption = str(figure.get("caption") or "")
-        excerpt = str(record.get("content") or "")[:1300]
+        figure_id = figure.get("figure_id")
+        if type(figure_id) is not int or figure_id < 1:
+            figure_id = None
         item = {
-            "document_id": document_id,
-            "path": path,
+            "document_id": document_id, "path": path,
             "page": page if type(page) is int and page > 0 else None,
-            "caption": caption,
+            "figure_id": figure_id,
+            "caption": str(figure.get("caption") or ""),
             "source_type": record.get("source_type", "original_text"),
-            "excerpt": excerpt,
+            "excerpt": str(record.get("content") or "")[:1300],
             "ocr_confidence": record.get("ocr_confidence"),
         }
-        items.append(item)
-        if (len(pages) >= max_pages or not path.lower().endswith(".pdf")
-                or not item["page"]):
+        sources.append(item)
+        if not path.lower().endswith(".pdf") or not item["page"]:
             continue
         key = (document_id, item["page"])
-        if key not in seen:
-            seen.add(key)
+        if figure_id is not None and record.get("source_type") == "ocr_figure":
+            if figure_id not in seen_figures:
+                seen_figures.add(figure_id)
+                figures.append(item)
+        elif key not in seen_pages:
+            seen_pages.add(key)
             pages.append(item)
-    return {"sources": items, "pages": pages}
+    # Only show whole pages when no grounded figure is available at all.
+    visuals = (figures or pages)[:max_pages]
+    return {"sources": sources, "pages": visuals}
+
 
 
 def register_rag_viewer(server: FastMCP, request: Callable) -> None:
@@ -72,25 +82,29 @@ def register_rag_viewer(server: FastMCP, request: Callable) -> None:
         return VIEWER_PATH.read_text(encoding="utf-8")
 
     async def show_rag_sources(query: str = "", document_id: int | None = None,
-                               page: int | None = None, max_pages: int = 4) -> dict:
-        """Show ORIGINAL local-RAG PDF pages in an interactive MCP App in chat.
+                               page: int | None = None, figure_id: int | None = None,
+                               max_pages: int = 4) -> dict:
+        """Display the ORIGINAL relevant PDF FIGURE as an image in ChatGPT.
 
         Use this after search_docs, or directly with a natural-language question
         about illustrated manuals. Also use it when the user did not explicitly
         request pictures if original manual images help explain the answer.
-        The displayed pages are retrieved exclusively from the authenticated
-        local RAG MCP connector: no internet search, standalone PDF skill or
-        generated/stock images. The app embeds original page JPEGs and enables
-        zoom and navigation. This tool provides a text fallback when the host
-        cannot render MCP Apps. It cannot force a host to select this tool.
-        Pass a query, OR a grounded document_id+page from search_docs.
+        Prefer the OCR figure (figure_id, indexed bounding box) over the
+        complete PDF page. No PDF viewer or multi-page navigation opens by
+        default; the user may explicitly choose 'Pagina completa'.
+        Original figure JPEGs are retrieved exclusively from authenticated
+        local RAG MCP: no internet, PDF skill, or generated images.
+        Pass a query, OR grounded document_id+page+optional figure_id from
+        search_docs. The tool cannot force a client to render the app.
         Do not invent document/page IDs. OCR recognition may be inaccurate.
         """
         if type(max_pages) is not int or not 1 <= max_pages <= 6:
             raise ValueError("max_pages must be between 1 and 6")
-        if document_id is not None or page is not None:
+        if document_id is not None or page is not None or figure_id is not None:
             if type(document_id) is not int or document_id < 1 or type(page) is not int or page < 1:
                 raise ValueError("document_id and page must both be positive integers")
+            if figure_id is not None and (type(figure_id) is not int or figure_id < 1):
+                raise ValueError("figure_id must be a positive integer")
             if query.strip():
                 raise ValueError("Use query or document_id+page, not both")
             metadata = await asyncio.to_thread(request, "/document-status",
@@ -100,7 +114,8 @@ def register_rag_viewer(server: FastMCP, request: Callable) -> None:
                 raise ValueError("Source is not an indexed PDF")
             item = {
                 "document_id": document_id, "page": page, "path": path,
-                "caption": "", "source_type": "selected_page",
+                "figure_id": figure_id,
+                "caption": "", "source_type": "selected_figure" if figure_id else "selected_page",
                 "excerpt": "", "ocr_confidence": None,
             }
             return {
@@ -118,13 +133,14 @@ def register_rag_viewer(server: FastMCP, request: Callable) -> None:
         return {
             "query": query, **prepared,
             "source_policy": "local_rag_only",
-            "note": "OCR is best-effort. The viewer fetches original PDF page images, "
-                    "not internet or generated images. Source pages are candidates "
-                    "from RAG search, not a guarantee every image is relevant.",
+            "note": "The app prefers cropped indexed original figures. "
+                    "Complete pages are displayed only when no figure was found or "
+                    "the user explicitly opens a page. OCR can contain errors.",
         }
 
     if tool_enabled("get_rag_page_data"):
-        async def get_rag_page_data(document_id: int, page: int) -> dict:
+        async def get_rag_page_data(document_id: int, page: int,
+                                    figure_id: int | None = None) -> dict:
             """UI-only tool: return a verified original RAG PDF page to the viewer.
 
             Hidden from normal model tool selection; the sandboxed MCP App
@@ -134,9 +150,14 @@ def register_rag_viewer(server: FastMCP, request: Callable) -> None:
                 raise ValueError("Invalid document_id")
             if type(page) is not int or page < 1:
                 raise ValueError("Invalid PDF page")
-            response = await asyncio.to_thread(
-                request, "/page-image", {"document_id": document_id, "page": page},
-            )
+            if figure_id is not None and (type(figure_id) is not int or figure_id < 1):
+                raise ValueError("Invalid figure_id")
+            payload = {"document_id": document_id, "page": page}
+            if figure_id is not None:
+                payload["figure_id"] = figure_id
+            response = await asyncio.to_thread(request, "/page-image", payload)
+            if response.get("figure_id") != figure_id:
+                raise RuntimeError("RAG figure selection mismatch")
             encoded = response.get("image_base64")
             if (response.get("mime_type") != "image/jpeg"
                     or not response.get("source_verified")
@@ -154,6 +175,9 @@ def register_rag_viewer(server: FastMCP, request: Callable) -> None:
                 "mime_type": "image/jpeg", "image_base64": encoded,
                 "source_sha256": response["source_sha256"],
                 "source_verified": True,
+                "figure_id": figure_id,
+                "figure_caption": response.get("figure_caption"),
+                "image_kind": response.get("image_kind"),
             }
 
         server.tool(
