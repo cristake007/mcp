@@ -26,7 +26,28 @@ if len(COOKIE_KEY) < 32 or COOKIE_KEY.startswith("CHANGE_ME"):
     raise RuntimeError("LOGIN_COOKIE_KEY must contain at least 32 random characters")
 
 provider = DatabaseOAuthProvider(base_url=BASE_URL)
-mcp = FastMCP(name="TUV Private MCP", auth=provider)
+
+# MCP's server-level instructions guide the assistant's answers, not the UI.
+# Technical verification fields remain available in the tool output.
+RAG_RESPONSE_INSTRUCTIONS = (
+    "Raspunde direct si natural la intrebare, fara comentarii automate despre "
+    "MCP, RAG, PostgreSQL, indexare, conexiune sau instrumentele folosite. "
+    "Cand folosesti informatii din documente, indica succint doar documentul "
+    "si pagina PDF verificata ori documentul si articolul confirmat: "
+    "'Sursa: manual.pdf, p. 12' sau 'Sursa: PT-CR-3-2025.pdf, art. 34'. "
+    "Nu inventa numere de pagini sau articole. Nu reda catre utilizator "
+    "campuri interne precum note, source_check, source_verified sau mesaje "
+    "standard despre verificari neefectuate. Nu adauga spontan avertismente "
+    "despre fisiere noi sau neindexate, daca intrebarea este despre continut. "
+    "Cand utilizatorul cere explicit actualitatea, completitudinea, "
+    "integritatea ori diagnosticarea indexului, verifica si explica precis "
+    "limitarile relevante. Nu ascunde erori reale sau incertitudini esentiale."
+)
+mcp = FastMCP(
+    name="TUV Private MCP", auth=provider,
+    instructions=(RAG_RESPONSE_INSTRUCTIONS
+                  if os.environ.get("MCP_RAG_ENABLED", "0") == "1" else None),
+)
 
 
 # RAG tools are absent unless explicitly activated via compose.rag.yaml.
