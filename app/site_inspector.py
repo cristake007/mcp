@@ -7,6 +7,8 @@ import hashlib
 import json
 import re
 import subprocess
+import threading
+import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from bs4.element import Comment, NavigableString, Tag
@@ -26,6 +28,35 @@ REMOVE_HTML = (
     ".elementor-location-header, .elementor-location-footer"
 )
 MAX_SOURCE_BYTES = 4_000_000
+
+# Short-lived sitemap-only cache avoids two redundant requests per batch.
+# Live page/ACF data are still retrieved anew every time.
+_SITEMAP_TTL_SECONDS = 300
+_SITEMAP_CACHE = {}
+_SITEMAP_CACHE_LOCK = threading.Lock()
+
+
+def _sitemap_xml(url: str) -> str:
+    url = _allowed(url)
+    with _SITEMAP_CACHE_LOCK:
+        cached = _SITEMAP_CACHE.get(url)
+        if cached and time.monotonic() - cached[0] < _SITEMAP_TTL_SECONDS:
+            return cached[1]
+    payload = _fetch(url, "application/xml,text/xml,*/*")
+    # Never cache broken or non-sitemap HTML challenges.
+    try:
+        parsed = ET.fromstring(payload)
+        if parsed.tag.split("}")[-1] not in ("sitemapindex", "urlset"):
+            return payload
+    except ET.ParseError:
+        return payload
+    with _SITEMAP_CACHE_LOCK:
+        if len(_SITEMAP_CACHE) >= 32:
+            _SITEMAP_CACHE.clear()
+        _SITEMAP_CACHE[url] = (time.monotonic(), payload)
+    return payload
+
+
 
 
 def _allowed(url: str) -> str:
@@ -96,7 +127,7 @@ def _xml_locations(xml: str, kind: str) -> list[str]:
 
 def _sitemaps() -> list[str]:
     links = _xml_locations(
-        _fetch(SITEMAP_INDEX, "application/xml,text/xml,*/*"), "sitemap"
+        _sitemap_xml(SITEMAP_INDEX), "sitemap"
     )
     return [_allowed(link) for link in links]
 
@@ -113,7 +144,7 @@ def _sitemap_url(value: str, known: list[str]) -> str:
 
 def _urls(sitemap_url: str) -> list[str]:
     links = _xml_locations(
-        _fetch(sitemap_url, "application/xml,text/xml,*/*"), "url"
+        _sitemap_xml(sitemap_url), "url"
     )
     # Ignore outbound links even if the XML contains unexpected locations.
     urls = []
