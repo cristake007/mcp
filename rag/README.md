@@ -108,13 +108,13 @@ After pulling the latest code, enable the bridge only if desired:
 cd /opt/mcp/rag
 # Existing rag/.env and DB password must be retained. Append the shared
 # bridge token only once. Do not commit this file.
-printf 'RAG_API_TOKEN=%s\\n' "$(openssl rand -hex 32)" >> .env
+printf 'RAG_API_TOKEN=%s\n' "$(openssl rand -hex 32)" >> .env
 docker network create mcp-rag-link
 docker compose -f compose.yaml -f compose.mcp.yaml up -d --build api
 
 # Enable the tools only on the MCP container; --no-deps leaves its DB alone.
 cd /opt/mcp
-docker compose --env-file .env --env-file rag/.env \\
+docker compose --env-file .env --env-file rag/.env \
   -f compose.yaml -f compose.rag.yaml up -d --no-deps --build mcp
 ```
 
