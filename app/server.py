@@ -56,6 +56,9 @@ if tool_enabled("ping"):
     mcp.tool()(ping)
 if tool_enabled("whoami"):
     mcp.tool()(whoami)
+if tool_enabled("inspect_site"):
+    from app.site_inspector import inspect_site
+    mcp.tool()(inspect_site)
 
 
 def login_cookie(ticket: str) -> str:
