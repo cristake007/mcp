@@ -111,6 +111,68 @@ comparison requires an **explicit review acknowledgment**; fetching a page
 never marks it as audited. The baseline is persisted in the MCP PostgreSQL
 database and shared by the server's authenticated users.
 
+### Stage 3: audit coverage and RAG document health
+
+`inspect_site(action="audit_report")` summarizes the **explicitly approved**
+review baselines stored by `audit_ack`, for an explicit sitemap and the same
+`fields` selection. It excludes archive/index landing pages, reports
+`auditable_urls`, `acknowledged_urls`, `not_acknowledged_urls` and
+paginated `entries` with `reviewed_at`. It **does not fetch individual
+pages**, compare against their current content, or prove linguistic
+correctness; statuses are `acknowledged_not_live_verified` and
+`not_acknowledged`. Follow `next_offset` for all entries.
+
+Example:
+
+```json
+{
+  "action": "audit_report",
+  "sitemap": "cursuri-sitemap.xml",
+  "fields": ["title", "acf.grup_tinta", "acf.tematica", "acf.tematica_descriere"],
+  "offset": 0,
+  "limit": 20
+}
+```
+
+Each `batch_get` and `audit_changes` result now also includes
+`coverage_report` with the exact number of requested and fetched URLs,
+fully returned first-part content, pages with `pending_continuation_urls`,
+`missing_fields`, extraction warnings and `failed_urls`, plus
+`requires_followup_urls`. These metrics describe only the **current tool
+batch** and never count AI-reviewed pages. `batch_complete` is false
+when selected fields are missing. Sum batch metrics only after processing
+every page, error and continuation part (continuations are not silently
+counted as complete by the initial response).
+
+The optional RAG tools `list_docs` (paginated index inventory) and
+`document_status` (integrity of one indexed document) use the **existing
+independent RAG PostgreSQL and private API**. They report document ID,
+source path, parser, index timestamp, warning counts, text length, chunk
+count and embeddings. `document_status` checks stored chunk coverage
+against the extracted text and lists parser warnings. The private RAG API
+does not mount the original documents: status is **not a live source-file
+freshness check**. `source_check="not_performed"` is always explicit.
+
+Examples:
+
+```json
+{"offset":0,"limit":50}
+```
+
+Pass that to `list_docs`; use a returned `document_id` with
+`document_status`:
+
+```json
+{"document_id":1}
+```
+
+Only after enabling the independent RAG integration are these tools
+advertised. They can be enabled/disabled with `./mcpctl tools` as usual.
+Updating both parts after `git pull`: `./mcpctl mcp apply`, then
+`./mcpctl rag enable` if RAG integration is enabled and must rebuild its
+private API. The latter rebuilds/restarts the optional bridge without
+mixing RAG into the root MCP container.
+
 ### Stage 2: larger batches and multi-term site search
 
 `batch_get` and `audit_changes` both accept up to **10 individual entries** in
