@@ -30,7 +30,7 @@ def get_page_image(conn, folder: Path, document_id: int, page: int) -> dict:
     init_schema(conn)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT path, sha256 FROM rag_documents WHERE id=%s",
+            "SELECT path, sha256, page_rotations FROM rag_documents WHERE id=%s",
             (document_id,),
         )
         item = cur.fetchone()
@@ -73,13 +73,21 @@ def get_page_image(conn, folder: Path, document_id: int, page: int) -> dict:
         if page > total_pages:
             raise ValueError(f"Invalid page {page}; PDF contains {total_pages} pages")
         source = pdf.pages[page - 1]
-        # Respect a <= 1050 x 1500 pixel bounding box and a modest 110 dpi.
-        # Prevent huge memory use on unusual PDF page dimensions.
-        dpi = min(110.0, 72.0 * 1050 / float(source.width),
-                  72.0 * 1500 / float(source.height))
+        clockwise = int(item["page_rotations"].get(str(page), 0))
+        if clockwise not in (0, 90, 180, 270):
+            raise ValueError("Invalid stored page orientation")
+        # Match the *normalized* page aspect ratio for display, even though
+        # the original PDF on disk remains unmodified.
+        display_width = float(source.height if clockwise in (90, 270) else source.width)
+        display_height = float(source.width if clockwise in (90, 270) else source.height)
+        dpi = min(110.0, 72.0 * 1050 / display_width,
+                  72.0 * 1500 / display_height)
         if dpi <= 0 or dpi < 4:
             raise ValueError("PDF page dimensions cannot be rendered safely")
         rendered = source.to_image(resolution=dpi, antialias=True).original.convert("RGB")
+        if clockwise:
+            # PIL positive degrees are CCW; PDF /Rotate positive is CW.
+            rendered = rendered.rotate(-clockwise, expand=True)
 
     stream = BytesIO()
     for quality in (85, 75, 65, 55):
@@ -110,7 +118,9 @@ def get_page_image(conn, folder: Path, document_id: int, page: int) -> dict:
         "source_sha256": item["sha256"],
         "source_verified": True,
         "image_kind": "rendered_original_pdf_page",
+        "orientation_corrected_clockwise": clockwise,
         "note": "Pagina originala PDF randata la cerere, nu imagine generata AI. "
+                "Orientarea reflecta normalizarea folosita la indexare. "
                 "Continutul vizual nu este indexat semantic; pagina se "
                 "alege din referintele returnate de search_docs.",
     }
