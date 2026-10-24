@@ -45,16 +45,18 @@ async def process(request: Request):
             term = params.get("term")
             second = params.get("second_term")
             mode = params.get("mode", "all")
+            match_type = params.get("match_type", "linguistic")
             examples_limit = params.get("examples_limit", 10)
             # Validate before opening a DB connection, including types.
             from .stats import validate
-            validate(term, second, mode, examples_limit)
+            validate(term, second, mode, examples_limit, match_type)
 
             def calculate():
                 with store.connect() as stats_conn:
                     return corpus_stats(
                         stats_conn, term, second,
                         mode=mode, examples_limit=examples_limit,
+                        match_type=match_type,
                     )
 
             # Full-corpus counting must not block the API event loop.
