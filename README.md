@@ -40,9 +40,10 @@ and uses the working browser-like headers with `curl`.
 | `get` | `url="https://tuvkarpat.ro/cursuri/.../"` | Full ACF JSON for courses |
 | `get` | `url="https://tuvkarpat.ro/industriale/.../"` | HTML without scripts, meta, iframe, noscript, global Elementor header/footer |
 | `get` | `url="https://tuvkarpat.ro/2022/10/13/.../"` | WordPress post content.rendered (fallback to cleaned HTML) |
-| `batch_get` | `sitemap="cursuri-sitemap.xml"`, `offset`, `limit=5` | Up to 5 pages per call as labeled text, with pending parts and errors |
+| `batch_get` | `sitemap="cursuri-sitemap.xml"`, `offset`, `limit=10` | Up to 10 pages per call as labeled text, with pending parts and errors |
 | `get` | `url="https://tuvkarpat.ro/cursuri/.../"`, `view="text"`, `part`, `max_chars=12000`, `expected_hash` | Retrieve every remaining part of a long page |
-| `search` | `query="ISO 9606"`, `sitemap="all"`, `offset`, `limit` | Literal matching URLs, occurrences and snippets |
+| `search` | `query="ISO 9606"`, `sitemap="all"`, `offset`, `limit` | Legacy single-term literal search |
+| `search_many` | `queries=["ISO 9001","munca"]`, `match_mode="accent_insensitive"`, `sitemap`, `offset`, `limit` | Search 1–10 terms with one fetch per URL and return exact snippets, positions and per-batch counts |
 
 `search` fetches at most 20 pages **per invocation**, using at most three
 concurrent requests. Follow `next_offset` until null and check `errors`
@@ -54,7 +55,7 @@ Only the exact HTTPS host `tuvkarpat.ro` is accepted. Redirects to other
 destinations are not followed. Remote fetching has time and size limits.
 Sitemap XML is cached in memory for 5 minutes, while page content is read live.
 `batch_get` supports a single sitemap at a time, accepts `offset` and
-`limit` (max 5 pages), and uses at most three concurrent requests.
+`limit` (max 10 pages), and uses at most four concurrent requests.
 It automatically excludes archive landing pages that match the sitemap
 name (for example `/cursuri/` in `cursuri-sitemap.xml`): they do not
 consume a batch slot or cause needless HTML fetches. The response includes
@@ -82,7 +83,7 @@ or `get(view="text")`, e.g.:
 {
   "action": "batch_get",
   "sitemap": "cursuri-sitemap.xml",
-  "limit": 5,
+  "limit": 10,
   "offset": 0,
   "fields": ["title", "acf.grup_tinta", "acf.tematica", "acf.tematica_descriere"]
 }
@@ -109,6 +110,50 @@ This does not make linguistic decisions or detect errors. Incremental
 comparison requires an **explicit review acknowledgment**; fetching a page
 never marks it as audited. The baseline is persisted in the MCP PostgreSQL
 database and shared by the server's authenticated users.
+
+### Stage 2: larger batches and multi-term site search
+
+`batch_get` and `audit_changes` both accept up to **10 individual entries** in
+one call, with at most four concurrent requests to avoid overloading WordPress.
+The previous `limit=5` still works unchanged. Each returned page retains its
+12,000-character first-part cap and explicit `pending_parts` retrieval: a
+ten-page response can therefore be larger, and the model must still check every
+part and `errors`. At 195 courses, requesting `limit=10` needs 20 paginated
+calls rather than 39 at `limit=5`, assuming no retries. This reduces tool
+round trips, not necessarily total fetch time.
+
+`search_many` accepts `queries` (1–10 non-empty, distinct terms; max 120
+characters each) and searches at most 20 sitemap URLs per call. Each page is
+downloaded **once**, regardless of the number of terms. Its `match_mode`:
+
+- `exact` (default): literal substring, Unicode case-insensitive;
+- `whole_word`: literal case-insensitive text with Unicode word boundaries;
+- `accent_insensitive`: literal substring, case- and diacritics-insensitive,
+  including comma-below and cedilla variants (e.g. `ț` and `ţ`).
+
+`matches` groups results by URL and term, and includes `occurrences`,
+`snippets`, and original visible-text `positions` (`start`, `end`). Each
+term reports at most three snippets/positions, but counts all matches.
+`query_totals` reports totals **for the current call only**. Follow
+`next_offset` and review `errors`; `complete` never certifies linguistic
+correctness.
+
+Example:
+
+```json
+{
+  "action": "search_many",
+  "sitemap": "cursuri-sitemap.xml",
+  "queries": ["ISO 9001", "munca", "verificare"],
+  "match_mode": "accent_insensitive",
+  "offset": 0,
+  "limit": 20
+}
+```
+
+For `search_many`, `limit` counts **scanned URLs** (maximum 20); for
+`batch_get`/`audit_changes` it counts returned audit entries (maximum 10).
+Existing `search` results and parameters are not changed.
 
 ### Stage 1: exact evidence verification and incremental audits
 
