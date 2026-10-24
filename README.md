@@ -105,10 +105,52 @@ offsets into the raw HTML. The text is not rephrased. For paginated content,
 pass the same `fields`, `max_chars` and `expected_hash` in every
 `get` request to retrieve the next part without mixing versions.
 
-This does not make linguistic decisions, detect errors, or persist a
-"previously reviewed" snapshot. Incremental comparison against prior
-audits needs a distinct baseline and an explicit review acknowledgement,
-not an automatic assumption that a page fetched by the server was audited.
+This does not make linguistic decisions or detect errors. Incremental
+comparison requires an **explicit review acknowledgment**; fetching a page
+never marks it as audited. The baseline is persisted in the MCP PostgreSQL
+database and shared by the server's authenticated users.
+
+### Stage 1: exact evidence verification and incremental audits
+
+All features remain inside the existing `inspect_site` tool (refresh its tool
+definition after deploying). The new actions are:
+
+- `action="verify_quote"`: supply a page `url`, one `field` (for example
+  `acf.tematica_descriere` or `html.body`) and exact `quote`. Returns
+  `verified`, occurrences, exact field paths, normalized-visible-text offsets
+  and context. It does **not** judge whether a correction is grammatically right.
+  Exact matching is case- and diacritics-sensitive.
+- `action="audit_changes"`: same `sitemap`, `offset`, `limit` and `fields`
+  as `batch_get`. Returns complete text only in `pages` for new/modified
+  content, and compact metadata in `unchanged` for content that matches a
+  previously acknowledged hash. Traverse `next_offset`, `errors` and
+  `pending_parts` as usual. Changes are detected by comparing freshly fetched
+  content; this saves returned text and model re-review, **not** WordPress HTTP
+  requests. Baselines are scoped to the *exact set* of selected fields.
+- `action="audit_ack"`: **after completing the linguistic review**, explicitly
+  acknowledge `reviews=[{"url": "...", "sha256": "..."}]` for up to 10 URLs,
+  along with the same `fields` as used for retrieval. For one page, `url`
+  and `expected_hash` are also accepted instead of `reviews`. Each page is
+  re-fetched, hashes are verified, missing requested fields and extraction
+  warnings are rejected, and the whole batch is then saved atomically. If
+  content changed, the action fails and nothing is acknowledged.
+
+Example verification:
+
+```json
+{"action":"verify_quote","url":"https://tuvkarpat.ro/cursuri/exemplu/","field":"acf.tematica","quote":"în conformitate cu cerințelor"}
+```
+
+Example incremental batch:
+
+```json
+{"action":"audit_changes","sitemap":"cursuri-sitemap.xml","offset":0,"limit":5,"fields":["title","acf.grup_tinta","acf.tematica","acf.tematica_descriere"]}
+```
+
+Reviewing text and acknowledging it are separate actions. A content hash alone
+does not certify that a human/model actually inspected the material, and an
+acknowledged page does not prove the text is error-free. Never acknowledge
+unexamined pages or omitted continuation parts. No WordPress data is modified.
 
 `batch_get` extracts all ACF leaf text values with field paths and extracts
 body text (including unknown widgets and tables) from pages. It does not
