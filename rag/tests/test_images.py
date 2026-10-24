@@ -40,6 +40,7 @@ class PageImageTests(unittest.TestCase):
             sample_pdf(source)
             (folder / "notes.txt").write_text("Notes", encoding="utf-8")
             with store.connect() as conn:
+                store.init_schema(conn)
                 with conn.cursor() as cur:
                     cur.execute("DELETE FROM rag_documents")
                 self.assertEqual(
@@ -84,6 +85,7 @@ class PageImageTests(unittest.TestCase):
             safe.mkdir()
             sample_pdf(safe / "real.pdf")
             with store.connect() as conn:
+                store.init_schema(conn)
                 with conn.cursor() as cur:
                     cur.execute("DELETE FROM rag_documents")
                 store.scan(conn, safe, use_vectors=False)
@@ -104,6 +106,7 @@ class PageImageApiTests(unittest.IsolatedAsyncioTestCase):
             folder = Path(temp)
             sample_pdf(folder / "manual.pdf")
             with store.connect() as conn:
+                store.init_schema(conn)
                 with conn.cursor() as cur:
                     cur.execute("DELETE FROM rag_documents")
                 store.scan(conn, folder, use_vectors=False)
