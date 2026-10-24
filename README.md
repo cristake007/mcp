@@ -27,6 +27,36 @@ MCP tool `corpus_stats` or `./mcpctl rag stats "term"`.
 Two-term statistics distinguish occurrence in the same article from
 occurrence elsewhere in the same document. Results are literal, not semantic.
 
+## Live site inspection (independent of RAG)
+
+The single **`inspect_site`** MCP tool queries public content on
+`https://tuvkarpat.ro`. It requires no WordPress credentials or RAG service,
+and uses the working browser-like headers with `curl`.
+
+| action | parameters | result |
+|---|---|---|
+| `sitemaps` | none | All sitemap URLs from `sitemap_index.xml` |
+| `urls` | `sitemap="industriale-sitemap.xml"`, `offset`, `limit` | URLs with pagination |
+| `get` | `url="https://tuvkarpat.ro/cursuri/.../"` | Full ACF JSON for courses |
+| `get` | `url="https://tuvkarpat.ro/industriale/.../"` | HTML without scripts, meta, iframe, noscript, global Elementor header/footer |
+| `get` | `url="https://tuvkarpat.ro/2022/10/13/.../"` | WordPress post content.rendered (fallback to cleaned HTML) |
+| `search` | `query="ISO 9606"`, `sitemap="all"`, `offset`, `limit` | Literal matching URLs, occurrences and snippets |
+
+`search` fetches at most 20 pages **per invocation**, using at most three
+concurrent requests. Follow `next_offset` until null and check `errors`
+and `complete` before claiming an exhaustive answer. The tool searches
+content as plain text without semantic inference. This is not a reliable
+automatic Romanian diacritics checker.
+
+Only the exact HTTPS host `tuvkarpat.ro` is accepted. Redirects to other
+destinations are not followed. Remote fetching has time and size limits.
+HTML `get` responses can be limited by `max_chars`; inspect `truncated`
+and `total_chars`.
+
+Enable/disable this tool with `./mcpctl tools enable inspect_site` or
+`./mcpctl tools disable inspect_site`; apply to the running container via
+`./mcpctl mcp apply`. Test offline: `python -m tests.site_inspector`.
+
 ## 1. Configure
 
 Use a Linux host with Docker Compose and an existing HTTPS Nginx virtual host.
