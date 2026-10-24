@@ -9,6 +9,7 @@ import re
 import subprocess
 import threading
 import time
+import unicodedata
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from bs4.element import Comment, NavigableString, Tag
@@ -253,7 +254,8 @@ BLOCK_TAGS = {
     "h5", "h6", "header", "hr", "li", "main", "ol", "p", "pre",
     "section", "summary", "table", "tbody", "tfoot", "thead", "tr", "ul",
 }
-BATCH_MAX_PAGES = 5
+BATCH_MAX_PAGES = 10
+BATCH_WORKERS = 4
 BATCH_CHARS_PER_PAGE = 12000
 
 
@@ -394,6 +396,76 @@ def _search_one(entry: tuple[str, str], query: str) -> dict | None:
     return {"url": url, "sitemap": sitemap, "occurrences": count, "snippets": snippets}
 
 
+
+def _accent_fold_with_positions(value: str) -> tuple[str, list[int]]:
+    """Case/accent-fold Unicode while retaining source character offsets.
+
+    A folded Unicode character can expand (e.g. casefold of 'ß'), so simply
+    using indexes from a normalized string would misquote source passages.
+    """
+    folded = []
+    positions = []
+    for index, char in enumerate(value):
+        normalized = "".join(
+            part for part in unicodedata.normalize("NFD", char)
+            if unicodedata.category(part) != "Mn"
+        ).casefold()
+        for part in normalized:
+            folded.append(part)
+            positions.append(index)
+    return "".join(folded), positions
+
+
+def _search_many_one(
+    entry: tuple[str, str], queries: list[str], match_mode: str,
+) -> dict | None:
+    """Fetch a page once and match every requested term against its text."""
+    url, sitemap = entry
+    content = _as_search_text(_read_page(url))
+    folded_content = ""
+    positions = []
+    if match_mode == "accent_insensitive":
+        folded_content, positions = _accent_fold_with_positions(content)
+
+    found = []
+    for query in queries:
+        if match_mode == "accent_insensitive":
+            folded_query, _ = _accent_fold_with_positions(query)
+            if not folded_query:
+                # Validation also prevents accent-only queries.
+                continue
+            hits = []
+            start = 0
+            while True:
+                pos = folded_content.find(folded_query, start)
+                if pos < 0:
+                    break
+                hits.append((positions[pos], positions[pos + len(folded_query) - 1] + 1))
+                start = pos + len(folded_query)
+        else:
+            boundary = match_mode == "whole_word"
+            pattern = re.escape(query)
+            if boundary:
+                pattern = r"(?<!\w)" + pattern + r"(?!\w)"
+            hits = [match.span() for match in re.finditer(pattern, content, re.IGNORECASE)]
+
+        if not hits:
+            continue
+        found.append({
+            "query": query,
+            "occurrences": len(hits),
+            "positions": [{"start": start, "end": end} for start, end in hits[:3]],
+            "snippets": [
+                content[max(0, start - 90): min(len(content), end + 90)]
+                for start, end in hits[:3]
+            ],
+        })
+    if not found:
+        return None
+    return {"url": url, "sitemap": sitemap, "terms": found}
+
+
+
 def _search_entries(sitemap: str) -> list[tuple[str, str]]:
     known = _sitemaps()
     selected = known if not sitemap or sitemap == "all" else [_sitemap_url(sitemap, known)]
@@ -422,6 +494,8 @@ def inspect_site(
     field: str = "",
     quote: str = "",
     reviews: list[dict] | None = None,
+    queries: list[str] | None = None,
+    match_mode: str = "exact",
 ) -> dict:
     """Inspect live tuvkarpat.ro through one MCP tool.
 
@@ -430,7 +504,7 @@ def inspect_site(
     get: retrieve a URL, view='raw' for HTML / ACF, view='text' for all
       visible HTML text or all ACF text fields (labeled with paths). For a large
       page request each next_part using the same max_chars and expected_hash.
-    batch_get: up to five individual pages per call; archive /cursuri/
+    batch_get: up to ten individual pages per call; archive /cursuri/
       does not consume an audit slot. Offsets apply to auditable URLs.
       Optional fields=['title','acf.grup_tinta','acf.tematica'] reduces
       returned content. Without fields, all available text is kept.
@@ -438,7 +512,12 @@ def inspect_site(
       Default batch text limit is 12000 characters PER page, with additional
       parts recoverable through get(view='text', part=...).
       Follow both next_offset and pending_parts; inspect all errors.
-    search: literal case-insensitive match, maximum twenty URLs per call.
+    search: legacy literal case-insensitive match, max twenty URLs per call.
+    search_many: 1..10 terms (queries) in one fetch per URL, max 20 URLs
+      per call. match_mode='exact' (case-insensitive substring), 'whole_word'
+      (Unicode word boundaries), or 'accent_insensitive' (case/diacritics
+      insensitive substring). Results are paginated and return exact snippets
+      and original-text offsets. Query totals cover only the current batch.
     verify_quote: exact quotation from one field path, with character offsets.
     audit_changes: batch_get only new/changed text since explicitly approved hashes.
     audit_ack: explicitly acknowledge a verified batch (url + sha256), or
@@ -447,9 +526,9 @@ def inspect_site(
     Diacritics and grammar must be interpreted by the LLM, not this tool.
     """
     if action not in ("sitemaps", "urls", "get", "batch_get", "search",
-                      "verify_quote", "audit_changes", "audit_ack"):
+                      "search_many", "verify_quote", "audit_changes", "audit_ack"):
         raise ValueError("Acțiune invalidă: sitemaps, urls, get, batch_get, "
-                         "search, verify_quote, audit_changes, audit_ack")
+                         "search, search_many, verify_quote, audit_changes, audit_ack")
     if not 0 <= offset <= 100000:
         raise ValueError("offset trebuie să fie între 0 și 100000")
     if not 1 <= limit <= 100:
@@ -607,7 +686,7 @@ def inspect_site(
         pages = []
         unchanged = []
         errors = []
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        with ThreadPoolExecutor(max_workers=min(BATCH_WORKERS, max(1, len(current)))) as pool:
             futures = [pool.submit(_batch_page, item, chars_per_page, selectors) for item in current]
             for item, future in zip(current, futures):
                 try:
@@ -651,6 +730,55 @@ def inspect_site(
                 "Only audit_ack explicitly marks pages reviewed; unchanged "
                 "means unchanged since that exact field selection was approved."
             ),
+        }
+
+    if action == "search_many":
+        if not isinstance(queries, list) or not 1 <= len(queries) <= 10:
+            raise ValueError("search_many necesită queries cu 1..10 termeni")
+        if match_mode not in ("exact", "whole_word", "accent_insensitive"):
+            raise ValueError("match_mode: exact, whole_word sau accent_insensitive")
+        seen_terms = set()
+        for term in queries:
+            if not isinstance(term, str) or not 1 <= len(term.strip()) <= 120:
+                raise ValueError("Fiecare termen trebuie să conțină 1..120 caractere")
+            normalized = term.casefold()
+            if normalized in seen_terms:
+                raise ValueError("Termeni duplicați în queries")
+            seen_terms.add(normalized)
+            if match_mode == "accent_insensitive" and not _accent_fold_with_positions(term)[0].strip():
+                raise ValueError("Termenul nu conține caractere căutabile")
+        entries = _search_entries(sitemap)
+        batch = entries[offset:offset + min(limit, 20)]
+        matches, errors = [], []
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(_search_many_one, item, queries, match_mode) for item in batch]
+            for item, future in zip(batch, futures):
+                try:
+                    result = future.result()
+                    if result:
+                        matches.append(result)
+                except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
+                    errors.append({"url": item[0], "error": str(exc)[:200]})
+        totals = {
+            term: {"query": term, "matching_urls": 0, "occurrences": 0}
+            for term in queries
+        }
+        for result in matches:
+            for match in result["terms"]:
+                summary = totals[match["query"]]
+                summary["matching_urls"] += 1
+                summary["occurrences"] += match["occurrences"]
+        next_offset = offset + len(batch)
+        next_offset = next_offset if next_offset < len(entries) else None
+        return {
+            "action": action, "queries": queries, "match_mode": match_mode,
+            "sitemap": sitemap or "all", "total_urls": len(entries),
+            "scanned": len(batch), "offset": offset, "next_offset": next_offset,
+            "complete": next_offset is None and not errors,
+            "matches": matches, "query_totals": list(totals.values()),
+            "totals_scope": "current_batch", "errors": errors,
+            "note": "Continue next_offset and inspect errors for full coverage. "
+                    "Results are literal text matches, not linguistic conclusions.",
         }
 
     if not query or not query.strip() or len(query) > 200:
