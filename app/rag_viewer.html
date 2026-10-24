@@ -25,7 +25,7 @@ aside{max-height:520px;overflow:auto;border-right:1px solid var(--line,#ddd);pad
 .source span{display:block;color:var(--muted,#687386);font-size:11px}
 section{min-width:0}
 .status{padding:10px 0;color:var(--muted,#687386);min-height:40px}
-.stage{background:#d7d9df;border:1px solid #bdc0c8;min-height:250px;max-height:620px;overflow:auto;display:flex;align-items:flex-start;justify-content:center;padding:8px;border-radius:8px}
+.stage{background:transparent;border:1px solid var(--line,#bdc0c8);min-height:120px;max-height:620px;overflow:auto;display:flex;align-items:flex-start;justify-content:center;padding:8px;border-radius:8px}
 .stage img{display:block;width:100%;max-width:none;height:auto;background:#fff;box-shadow:0 2px 14px #0003}
 .fig{font-size:13px;line-height:1.5;margin:10px 0}
 pre{white-space:pre-wrap;word-break:break-word;margin:5px 0 0;background:var(--button,#f4f5f7);padding:10px;border-radius:7px;font:12px/1.5 system-ui,sans-serif;max-height:180px;overflow:auto}
@@ -40,9 +40,10 @@ pre{white-space:pre-wrap;word-break:break-word;margin:5px 0 0;background:var(--b
 <header>
 <div><h1>Documente din RAG</h1><small id="query">Surse originale, fără internet</small></div>
 <div class="toolbar">
-<button id="previous" type="button" title="Pagina anterioară">‹</button>
-<span id="pagecounter" aria-live="polite">—</span>
-<button id="next" type="button" title="Pagina următoare">›</button>
+<button id="togglePage" type="button" hidden>Pagina completă</button>
+<button id="previous" type="button" title="Pagina anterioară" hidden>‹</button>
+<span id="pagecounter" aria-live="polite" hidden>—</span>
+<button id="next" type="button" title="Pagina următoare" hidden>›</button>
 <button id="zoomOut" type="button" title="Micșorează">−</button>
 <button id="zoomIn" type="button" title="Mărește">+</button>
 <button id="zoomReset" type="button" title="Reinițializează zoom">100%</button>
@@ -55,7 +56,7 @@ pre{white-space:pre-wrap;word-break:break-word;margin:5px 0 0;background:var(--b
 <div id="status" class="status" role="status" aria-live="polite">Se încarcă sursele MCP…</div>
 <div id="stage" class="stage" hidden><img id="image" alt="Pagina originală PDF din RAG" /></div>
 <div id="excerptWrap" hidden><small>Fragment indexat (OCR-ul poate conține erori):</small><pre id="excerpt"></pre></div>
-<div class="note">Imaginile sunt obținute exclusiv prin MCP din PDF-ul original indexat și verificat SHA-256. Nicio imagine publică sau generată.</div>
+<div class="note">Figură decupată automat din PDF-ul original indexat în RAG și verificat SHA-256. Pagina completă poate fi deschisă separat.</div>
 </section>
 </div>
 </main>
@@ -90,8 +91,16 @@ pre{white-space:pre-wrap;word-break:break-word;margin:5px 0 0;background:var(--b
   }
   function updateButtons(){
     const page=state.current;
-    el("previous").disabled=!page||page.page<=1;
-    el("next").disabled=!page||!state.totalPages||page.page>=state.totalPages;
+    const source=state.pages[state.selected];
+    const hasFigure=Number.isInteger(source?.figure_id)&&source.figure_id>0;
+    const isFull=!!page&&!page.figure_id;
+    el("togglePage").hidden=!hasFigure;
+    el("togglePage").textContent=isFull?"Arată figura":"Pagina completă";
+    el("previous").hidden=!isFull;
+    el("next").hidden=!isFull;
+    el("pagecounter").hidden=!isFull;
+    el("previous").disabled=!isFull||page.page<=1;
+    el("next").disabled=!isFull||!state.totalPages||page.page>=state.totalPages;
     el("pagecounter").textContent=page?(page.page+" / "+(state.totalPages||"?")):"—";
     el("zoomIn").disabled=!page;
     el("zoomOut").disabled=!page;
@@ -104,43 +113,51 @@ pre{white-space:pre-wrap;word-break:break-word;margin:5px 0 0;background:var(--b
       b.type="button";b.className="source"+(i===state.selected?" active":"");
       const title=document.createElement("b");title.textContent=(p.path||"Document").split("/").pop();
       const detail=document.createElement("span");
-      detail.textContent="Pagina "+p.page+(p.caption?" · "+p.caption:"");
+      detail.textContent=(p.figure_id?"Figura · pagina ":"Pagina ")+p.page+(p.caption?" · "+p.caption:"");
       b.append(title,detail);
       b.addEventListener("click",()=>load(i));
       panel.append(b);
     });
     if(!state.pages.length)panel.textContent="Nu există pagini PDF asociate căutării.";
   }
-  async function load(index,overridePage){
+  async function load(index,overridePage,forceFull=false){
     if(index<0||index>=state.pages.length)return;
     state.selected=index;
     const item=state.pages[index];
     const page=overridePage||item.page;
-    state.current={document_id:item.document_id,page};
+    const figureId=(!forceFull&&page===item.page&&Number.isInteger(item.figure_id))
+      ?item.figure_id:null;
+    state.current={document_id:item.document_id,page,figure_id:figureId};
     state.totalPages=0;
     const serialNow=++state.serial;
     renderSourceList();
     updateButtons();
     el("stage").hidden=true;
     el("image").removeAttribute("src");
-    el("sourceTitle").textContent=(item.path||"Document")+" · pagina "+page+(item.caption?" · "+item.caption:"");
+    el("sourceTitle").textContent=(item.path||"Document")+" · "
+      +(figureId?"figura originală":"pagina completă")+" · pagina "+page
+      +(item.caption?" · "+item.caption:"");
     el("excerpt").textContent=item.excerpt||"";
     el("excerptWrap").hidden=!item.excerpt;
-    status("Se preia pagina originală prin MCP…");
+    status(figureId?"Se preia imaginea originală din RAG…":"Se preia pagina completă din RAG…");
     try {
+      const args={document_id:item.document_id,page};
+      if(figureId)args.figure_id=figureId;
       const response=await rpc("tools/call",{
-        name:"get_rag_page_data",arguments:{document_id:item.document_id,page}
+        name:"get_rag_page_data",arguments:args
       });
       if(serialNow!==state.serial)return;
       const data=unwrap(response);
       if(!data||!data.source_verified||data.mime_type!=="image/jpeg"
           ||typeof data.image_base64!=="string"||!data.image_base64.length
-          ||data.document_id!==item.document_id||data.page!==page)
+          ||data.document_id!==item.document_id||data.page!==page
+          ||data.figure_id!==figureId)
         throw new Error("Răspuns nevalid pentru pagina PDF.");
       state.totalPages=data.total_pages;
       // Data URL contains only validated server-produced JPEG bytes.
       el("image").src="data:image/jpeg;base64,"+data.image_base64;
-      el("image").alt="PDF original: "+data.path+", pagina "+data.page;
+      el("image").alt=(figureId?"Figura originală":"Pagina originală")
+        +": "+data.path+", pagina "+data.page;
       setZoom(1);el("stage").hidden=false;el("status").hidden=true;
     } catch (err) {
       if(serialNow===state.serial)status("Nu s-a putut încărca pagina din MCP: "+(err&&err.message||"eroare de comunicare"));
@@ -169,8 +186,14 @@ pre{white-space:pre-wrap;word-break:break-word;margin:5px 0 0;background:var(--b
     }
     if(data.method==="ui/notifications/tool-result")apply(data.params);
   });
-  el("previous").onclick=()=>{if(state.current&&state.current.page>1)load(state.selected,state.current.page-1)};
-  el("next").onclick=()=>{if(state.current&&state.current.page<state.totalPages)load(state.selected,state.current.page+1)};
+  el("togglePage").onclick=()=>{
+    const current=state.current;
+    if(!current)return;
+    if(current.figure_id)load(state.selected,current.page,true);
+    else load(state.selected);
+  };
+  el("previous").onclick=()=>{if(state.current&&!state.current.figure_id&&state.current.page>1)load(state.selected,state.current.page-1,true)};
+  el("next").onclick=()=>{if(state.current&&!state.current.figure_id&&state.current.page<state.totalPages)load(state.selected,state.current.page+1,true)};
   el("zoomIn").onclick=()=>setZoom(state.zoom+.25);
   el("zoomOut").onclick=()=>setZoom(state.zoom-.25);
   el("zoomReset").onclick=()=>setZoom(1);
