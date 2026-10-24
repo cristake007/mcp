@@ -48,6 +48,14 @@ async def main() -> None:
         if path == "/search":
             assert payload == {"query": "MANTIS conectori", "limit": 12}
             return {"results": sample}
+        if path == "/figures":
+            assert payload == {"document_id": 8, "page": 12}
+            return {"figures": [
+                {"figure_id": 11, "caption": "Figure 3: MANTIS controls",
+                 "excerpt": "save mode button", "ocr_confidence": 75},
+                {"figure_id": 12, "caption": "Figure 4: MANTIS connectors",
+                 "excerpt": "Ethernet USB connector", "ocr_confidence": 88},
+            ]}
         if path == "/document-status":
             assert payload == {"document_id": 8}
             return {"document_id": 8, "path": "manual/MANTIS.pdf"}
@@ -88,6 +96,12 @@ async def main() -> None:
     )
     assert direct.structured_content["pages"][0]["page"] == 12
     assert direct.structured_content["pages"][0]["figure_id"] == 12
+    inferred = await tools["show_rag_sources"].run(
+        {"document_id": 8, "page": 12},
+    )
+    assert len(inferred.structured_content["pages"]) == 2
+    assert [item["figure_id"] for item in inferred.structured_content["pages"]] == [11, 12]
+    assert all(item["figure_id"] for item in inferred.structured_content["pages"])
 
     picture = await tools["get_rag_page_data"].run({"document_id": 8, "page": 12})
     assert picture.structured_content["source_verified"]
