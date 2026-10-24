@@ -15,6 +15,7 @@ from starlette.routing import Route
 from app.db import get_active_user_id, healthy, user_for_token
 from app.http_security import TokenResourceGuard
 from app.oauth import DatabaseOAuthProvider, digest
+from app.tool_policy import tool_enabled
 
 BASE_URL = os.environ["PUBLIC_BASE_URL"].rstrip("/")
 COOKIE_KEY = os.environ["LOGIN_COOKIE_KEY"]
@@ -35,13 +36,11 @@ if os.environ.get("MCP_RAG_ENABLED", "0") == "1":
     register_rag_tools(mcp)
 
 
-@mcp.tool()
 def ping() -> str:
     """Check that the authenticated MCP connection works."""
     return "pong"
 
 
-@mcp.tool()
 async def whoami() -> dict[str, str]:
     """Return the email associated with the current MCP access token."""
     token = get_access_token()
@@ -51,6 +50,12 @@ async def whoami() -> dict[str, str]:
     if not user:
         raise PermissionError("Invalid or disabled account")
     return {"email": user["email"]}
+
+# Register only enabled tools. Disabled tools are not advertised or callable.
+if tool_enabled("ping"):
+    mcp.tool()(ping)
+if tool_enabled("whoami"):
+    mcp.tool()(whoami)
 
 
 def login_cookie(ticket: str) -> str:
