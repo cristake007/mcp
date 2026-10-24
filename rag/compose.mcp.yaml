@@ -13,10 +13,12 @@ services:
       PGPASSWORD: ${RAG_DB_PASSWORD:?Set RAG_DB_PASSWORD in rag/.env}
       RAG_EMBEDDINGS_ENABLED: ${RAG_EMBEDDINGS_ENABLED:-1}
       RAG_API_TOKEN: ${RAG_API_TOKEN:?Set RAG_API_TOKEN in rag/.env}
+      RAG_DOCUMENTS: /documents
       FASTEMBED_CACHE_PATH: /model-cache
       HF_HUB_DISABLE_TELEMETRY: "1"
       OMP_NUM_THREADS: "2"
     volumes:
+      - ./documents:/documents:ro
       - model_cache:/model-cache
     networks:
       rag_private: {}
