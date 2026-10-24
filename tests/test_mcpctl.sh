@@ -33,6 +33,7 @@ ctl tools list | grep 'corpus_stats.*unavailable' >/dev/null
 ctl tools list | grep 'list_docs.*unavailable' >/dev/null
 ctl tools list | grep 'document_status.*unavailable' >/dev/null
 ctl tools list | grep 'corpus_health.*unavailable' >/dev/null
+ctl tools list | grep 'get_page_image.*unavailable' >/dev/null
 ctl tools disable whoami
 grep -qx 'MCP_DISABLED_TOOLS=whoami' "$TMP/.env"
 ctl tools list | grep 'whoami.*disabled' >/dev/null
@@ -61,6 +62,7 @@ test -n "$(grep '^RAG_API_TOKEN=' "$TMP/rag/.env")"
 ctl tools list | grep 'get_text.*enabled' >/dev/null
 ctl tools list | grep 'corpus_stats.*enabled' >/dev/null
 ctl tools list | grep 'corpus_health.*enabled' >/dev/null
+ctl tools list | grep 'get_page_image.*enabled' >/dev/null
 ctl rag disable
 [[ ! -f "$TMP/.mcp-rag-enabled" ]]
 ctl rag stop
@@ -70,6 +72,7 @@ ctl tools list | grep 'corpus_stats.*unavailable' >/dev/null
 ctl tools list | grep 'list_docs.*unavailable' >/dev/null
 ctl tools list | grep 'document_status.*unavailable' >/dev/null
 ctl tools list | grep 'corpus_health.*unavailable' >/dev/null
+ctl tools list | grep 'get_page_image.*unavailable' >/dev/null
 grep -qx 'POSTGRES_PASSWORD=CI_SECRET' "$TMP/.env"
 grep -qx 'RAG_DB_PASSWORD=CI_RAG_PASSWORD' "$TMP/rag/.env"
 ctl rag stats autorizare --second-term suspendare --mode all
