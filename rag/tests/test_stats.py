@@ -103,5 +103,67 @@ class CorpusStatsDatabaseTests(unittest.TestCase):
                 self.assertEqual(accents["matching_documents"], 2)
 
 
+@unittest.skipUnless(os.environ.get("RAG_TEST_DB") == "1", "Requires isolated pgvector PostgreSQL")
+class CorpusStatsAPITests(unittest.IsolatedAsyncioTestCase):
+    async def test_stats_endpoint_authorization_and_complete_counts(self):
+        import httpx
+        from ragcore import store
+        from ragcore.api import app
+
+        with tempfile.TemporaryDirectory() as scratch:
+            folder = Path(scratch)
+            (folder / "one.txt").write_text(
+                "Art. 1 (1) Autorizare și suspendare.", encoding="utf-8"
+            )
+            (folder / "two.md").write_text(
+                "Art. 2 (1) Suspendare.", encoding="utf-8"
+            )
+            with store.connect() as conn:
+                store.init_schema(conn)
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM rag_documents")
+                self.assertEqual(store.scan(conn, folder, use_vectors=False)["updated"], 2)
+
+            previous = os.environ.get("RAG_API_TOKEN")
+            token = "unit-test-local-secret-token-123456789abcdef"
+            os.environ["RAG_API_TOKEN"] = token
+            try:
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="http://rag-api",
+                ) as client:
+                    denied = await client.post("/stats", json={"term": "autorizare"})
+                    self.assertEqual(denied.status_code, 401)
+                    headers = {"Authorization": "Bearer " + token}
+                    response = await client.post(
+                        "/stats", headers=headers,
+                        json={"term": "autorizare", "second_term": "suspendare",
+                              "examples_limit": 0},
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    data = response.json()
+                    self.assertEqual(data["documents_scanned"], 2)
+                    self.assertEqual(data["matching_documents"], 1)
+                    self.assertEqual(data["matching_articles"], 1)
+                    self.assertEqual(data["occurrences_per_term"], [1, 2])
+                    self.assertEqual(data["document_examples"], [])
+                    self.assertTrue(data["exhaustive_counts"])
+                    for invalid in (
+                        {"term": ""},
+                        {"term": 15},
+                        {"term": "ISO", "mode": "neither"},
+                        {"term": "ISO", "examples_limit": 30},
+                        {"term": "ISO", "examples_limit": True},
+                    ):
+                        rejected = await client.post("/stats", json=invalid, headers=headers)
+                        self.assertEqual(rejected.status_code, 400, rejected.text)
+                    self.assertEqual((await client.get("/stats", headers=headers)).status_code, 405)
+            finally:
+                if previous is None:
+                    os.environ.pop("RAG_API_TOKEN", None)
+                else:
+                    os.environ["RAG_API_TOKEN"] = previous
+
+
 if __name__ == "__main__":
     unittest.main()
