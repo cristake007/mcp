@@ -29,7 +29,7 @@ def _request(path: str, payload: dict) -> dict:
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=60 if path == "/stats" else 25) as response:
+        with urllib.request.urlopen(request, timeout=90 if path == "/corpus-health" else 60 if path == "/stats" else 25) as response:
             if response.status != 200:
                 raise RuntimeError("RAG returned an unexpected HTTP status")
             body = response.read(1_500_001)
