@@ -216,7 +216,7 @@ def search(conn, query: str, *, limit: int = 8, use_vectors: bool = True) -> lis
         for chunk_id in top:
             record = rows[chunk_id]
             raw = record.pop("raw_text")
-            article = article_for_hit(raw, record["char_start"], record["char_end"])
+            article = article_for_hit(raw, record["char_start"], record["char_end"], query)
             output.append({
                 **record,
                 "article": article.info(include_text=raw) if article else None,
