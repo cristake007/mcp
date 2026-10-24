@@ -235,11 +235,128 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                         "/document-status", json={"document_id": 9999999}, headers=headers,
                     )
                     self.assertEqual(missing.status_code, 400)
+                    from unittest.mock import patch
+                    with patch.dict(os.environ, {"RAG_DOCUMENTS": str(scratch)}):
+                        corpus = await client.post(
+                            "/corpus-health",
+                            json={"offset": 0, "limit": 5},
+                            headers=headers,
+                        )
+                        self.assertEqual(corpus.status_code, 200, corpus.text)
+                        self.assertEqual(corpus.json()["status"], "healthy")
+                        self.assertEqual(corpus.json()["summary"]["current_files"], 1)
+                        self.assertEqual(corpus.json()["summary"]["unindexed_files"], 0)
+                        file.write_text("Text schimbat între două scanări", encoding="utf-8")
+                        changed = await client.post(
+                            "/corpus-health", json={}, headers=headers,
+                        )
+                        self.assertEqual(changed.status_code, 200, changed.text)
+                        self.assertEqual(changed.json()["summary"]["modified_files"], 1)
+                        invalid = await client.post(
+                            "/corpus-health", json={"limit": False}, headers=headers,
+                        )
+                        self.assertEqual(invalid.status_code, 400)
+                    no_auth = await client.post("/corpus-health", json={})
+                    self.assertEqual(no_auth.status_code, 401)
             finally:
                 if prior is None:
                     os.environ.pop("RAG_API_TOKEN", None)
                 else:
                     os.environ["RAG_API_TOKEN"] = prior
+
+
+@unittest.skipUnless(os.environ.get("RAG_TEST_DB") == "1", "Only with isolated CI PostgreSQL")
+class CorpusHealthTests(unittest.TestCase):
+    def test_full_inventory_and_mount_safety(self):
+        from ragcore import store
+        from ragcore.health import corpus_health
+
+        with tempfile.TemporaryDirectory() as scratch:
+            folder = Path(scratch)
+            (folder / "nested").mkdir()
+            (folder / "nested" / "indexed.txt").write_text("Prima versiune", encoding="utf-8")
+            missing = folder / "missing.md"
+            missing.write_text("Un document care dispare", encoding="utf-8")
+            with store.connect() as conn:
+                store.init_schema(conn)
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM rag_documents")
+                self.assertEqual(store.scan(conn, folder, use_vectors=False)["updated"], 2)
+                first = corpus_health(conn, folder)
+                self.assertEqual(first["status"], "healthy")
+                self.assertEqual(first["summary"]["current_files"], 2)
+                self.assertEqual(first["summary"]["indexed_documents"], 2)
+                self.assertEqual(first["summary"]["unindexed_files"], 0)
+                self.assertTrue(first["source_directory_checked"])
+                self.assertTrue(first["read_only"])
+
+                (folder / "nested" / "indexed.txt").write_text(
+                    "Document modificat", encoding="utf-8",
+                )
+                missing.unlink()
+                (folder / "new.pdf").write_bytes(b"%PDF-1.5 fake test")
+                (folder / "readme.bin").write_bytes(b"Not a supported extension")
+                large = folder / "very-large.txt"
+                with large.open("wb") as stream:
+                    stream.truncate(31 * 1024 * 1024)
+                (folder / "symlink.txt").symlink_to(folder / "nested" / "indexed.txt")
+
+                report = corpus_health(conn, folder, limit=2)
+                self.assertEqual(report["status"], "attention_required")
+                self.assertEqual(report["summary"]["indexed_documents"], 2)
+                self.assertEqual(report["summary"]["modified_files"], 1)
+                self.assertEqual(report["summary"]["new_files"], 1)
+                self.assertEqual(report["summary"]["unindexed_files"], 1)
+                self.assertEqual(report["summary"]["missing_files"], 1)
+                self.assertEqual(report["summary"]["oversized_files"], 1)
+                self.assertEqual(report["summary"]["unsupported_files"], 1)
+                self.assertEqual(report["summary"]["ignored_symlinks"], 1)
+                self.assertIsNotNone(report["next_offset"])
+                all_files = []
+                offset = 0
+                while True:
+                    batch = corpus_health(conn, folder, offset=offset, limit=2)
+                    self.assertEqual(batch["summary"], report["summary"])
+                    all_files.extend(batch["files"])
+                    if batch["next_offset"] is None:
+                        break
+                    offset = batch["next_offset"]
+                self.assertEqual(
+                    {entry["path"]: entry["status"] for entry in all_files},
+                    {"nested/indexed.txt": "modified", "missing.md": "missing",
+                     "new.pdf": "new_unindexed", "readme.bin": "unsupported",
+                     "very-large.txt": "oversized", "symlink.txt": "ignored_symlink"},
+                )
+
+                for path in (folder / "nested" / "indexed.txt", folder / "new.pdf",
+                             folder / "readme.bin", large, folder / "symlink.txt"):
+                    path.unlink()
+                empty = corpus_health(conn, folder)
+                self.assertTrue(empty["source_directory_empty"])
+                self.assertEqual(empty["status"], "source_directory_empty_check_mount")
+                self.assertIsNotNone(empty["source_mount_warning"])
+                self.assertEqual(empty["summary"]["missing_files"], 2)
+
+                with self.assertRaisesRegex(RuntimeError, "missing"):
+                    corpus_health(conn, folder / "not-mounted")
+
+    def test_validation_and_empty_index(self):
+        from ragcore import store
+        from ragcore.health import corpus_health
+
+        with tempfile.TemporaryDirectory() as scratch:
+            folder = Path(scratch)
+            with store.connect() as conn:
+                store.init_schema(conn)
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM rag_documents")
+                report = corpus_health(conn, folder)
+                self.assertEqual(report["status"], "healthy")
+                self.assertEqual(report["summary"]["indexed_documents"], 0)
+                self.assertEqual(report["summary"]["supported_files_on_disk"], 0)
+                for offset, limit in ((False, 10), (0, True), (-1, 10), (0, 0)):
+                    with self.assertRaises(ValueError):
+                        corpus_health(conn, folder, offset=offset, limit=limit)
 
 
 @unittest.skipUnless(os.environ.get("RAG_TEST_DB") == "1", "Only with isolated CI PostgreSQL")
