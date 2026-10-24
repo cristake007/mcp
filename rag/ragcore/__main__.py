@@ -24,6 +24,11 @@ def parser():
     text.add_argument("--start", type=int)
     text.add_argument("--end", type=int)
     text.add_argument("--article", help="e.g. 34 or Art. 34 (full extracted article)")
+    stats = sub.add_parser("stats", help="Exact counts across ALL indexed documents and articles")
+    stats.add_argument("term", help="Literal word or phrase to count")
+    stats.add_argument("--second-term", default=None, help="Second term for co-occurrence")
+    stats.add_argument("--mode", choices=("all", "any"), default="all")
+    stats.add_argument("--examples-limit", type=int, default=10)
     sub.add_parser("verify", help="Verify stored chunk content and coverage")
     sub.add_parser("status", help="Show document/chunk counts")
     return root
@@ -54,6 +59,14 @@ def main():
                     use_vectors=enabled() and not args.lexical_only,
                 )
                 print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+            elif args.action == "stats":
+                from .stats import corpus_stats
+                store.init_schema(conn)
+                result = corpus_stats(
+                    conn, args.term, args.second_term,
+                    mode=args.mode, examples_limit=args.examples_limit,
+                )
+                print(json.dumps(result, ensure_ascii=False, indent=2))
             elif args.action == "get-text":
                 _, content = store.get_text(
                     conn, args.document_id, args.start, args.end, article=args.article
