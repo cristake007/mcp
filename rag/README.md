@@ -95,6 +95,68 @@ produce a nonzero CLI exit code.
   avoids approximate-index recall trade-offs. New or modified documents are
   processed only on explicit scan, never in a background process.
 
+## Optional MCP connection (disabled by default)
+
+**Normal MCP and normal RAG are still independent.** The bridge is an
+additional service and two Compose overlays. It never exposes a host
+port, never mounts source documents into MCP and never gives MCP direct
+PostgreSQL credentials for RAG.
+
+After pulling the latest code, enable the bridge only if desired:
+
+```bash
+cd /opt/mcp/rag
+# Existing rag/.env and DB password must be retained. Append the shared
+# bridge token only once. Do not commit this file.
+printf 'RAG_API_TOKEN=%s\\n' "$(openssl rand -hex 32)" >> .env
+docker network create mcp-rag-link
+docker compose -f compose.yaml -f compose.mcp.yaml up -d --build api
+
+# Enable the tools only on the MCP container; --no-deps leaves its DB alone.
+cd /opt/mcp
+docker compose --env-file .env --env-file rag/.env \\
+  -f compose.yaml -f compose.rag.yaml up -d --no-deps --build mcp
+```
+
+If the Docker network already exists, skip `docker network create`. Use
+the **same token** in both projects by keeping it in `rag/.env`, supplied
+as an additional Compose env file to the MCP overlay.
+
+Only with the overlays active does MCP advertise `search_docs` and
+`get_text`. The RAG API is reachable only over the opt-in
+`mcp-rag-link` Docker network and requires a shared bearer secret.
+The HTTP API offers only POST `/search` and POST `/text`; no document
+writing, admin endpoints, browser UI or public listening ports.
+
+`search_docs` returns literal indexed chunks, their source offsets,
+location metadata, RRF score and (when a legal article heading is
+recognizable) its exact extracted text or its full character range.
+The article assignment is heuristic for chunks crossing headings; verify
+legal quotes against the original document. `get_text` returns literal
+stored text by document ID with optional `start`/`end` or `article`
+(e.g. `"Art. 34"`). Ambiguous/repeated article numbers require offsets.
+HTTP text output is limited to 25,000 characters per call.
+
+There is no automatic shared-secret or model provisioner. Index documents
+from this RAG project's CLI as before. The internal API loads the local
+embeddings model into RAM when semantic queries first arrive, and keeps it
+for repeated searches. If the API is stopped, MCP's other tools still work.
+
+### Disable again (keep independent RAG database/documents)
+
+```bash
+cd /opt/mcp
+docker compose up -d --no-deps mcp
+cd /opt/mcp/rag
+docker compose -f compose.yaml -f compose.mcp.yaml stop api
+```
+
+The first command returns MCP to its normal configuration (without RAG
+tools); the second stops the optional RAG API. Ordinary RAG CLI commands
+and `rag/database` still work. No data migration is needed either way.
+For complete RAG shutdown, use the normal RAG-only `docker compose down`
+described below, from `/opt/mcp/rag` without the overlays.
+
 ## Completely optional / uninstall independently
 
 ```bash
