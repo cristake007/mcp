@@ -8,6 +8,7 @@ RAG="$ROOT/rag"
 MAIN_ENV="$ROOT/.env"
 RAG_ENV="$RAG/.env"
 RAG_FLAG="$ROOT/.mcp-rag-enabled"
+cd "$ROOT"
 TOOLS=(ping whoami search_docs get_text)
 
 die() { printf 'Eroare: %s\n' "$*" >&2; exit 1; }
@@ -137,7 +138,7 @@ mcp_compose() {
 
 rag_compose() {
     need_rag_env
-    docker compose -f "$RAG/compose.yaml" "$@"
+    docker compose --env-file "$RAG_ENV" -f "$RAG/compose.yaml" "$@"
 }
 
 tool_list() {
