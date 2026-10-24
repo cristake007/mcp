@@ -193,9 +193,11 @@ the **same token** in both projects by keeping it in `rag/.env`, supplied
 as an additional Compose env file to the MCP overlay.
 
 Only with the overlays active does MCP advertise `search_docs`,
-`get_text` and `corpus_stats` (unless individually disabled). The RAG API is reachable only over the opt-in
+`get_text`, `corpus_stats`, `list_docs` and `document_status`
+(unless individually disabled). The RAG API is reachable only over the opt-in
 `mcp-rag-link` Docker network and requires a shared bearer secret.
-The HTTP API offers only read-only POST `/search`, `/text`, `/stats`; no document
+The HTTP API offers only read-only POST `/search`, `/text`, `/stats`,
+`/documents`, `/document-status`; no document
 writing, admin endpoints, browser UI or public listening ports.
 
 `search_docs` returns literal indexed chunks, their source offsets,
@@ -206,6 +208,32 @@ legal quotes against the original document. `get_text` returns literal
 stored text by document ID with optional `start`/`end` or `article`
 (e.g. `"Art. 34"`). Ambiguous/repeated article numbers require offsets.
 HTTP text output is limited to 25,000 characters per call.
+
+### Document inventory and index health (stage 3)
+
+The optional MCP tool `list_docs(offset=0, limit=50)` lists indexed
+documents, including the original relative path, parser, last indexed time,
+stored text size, number of chunks, embedding count and parser warning count.
+Results are paginated via `next_offset`; `total_documents` counts indexed
+records in PostgreSQL. It does not expose full document contents.
+
+`document_status(document_id)` verifies one document's **stored index**:
+every extracted character is covered by chunks, stored chunk content agrees
+with extracted raw text, chunk ordinals are contiguous, and embeddings match
+the recorded model. It also lists all extraction warnings. Results indicate
+`indexed_complete`, `incomplete`, or `empty`; extraction warnings are
+reported separately and need examination.
+
+These tools use the isolated RAG API and PostgreSQL, not the original files.
+The API deliberately has **no source-document mount**. Therefore
+`source_check="not_performed"` means that an `indexed_complete` result
+**cannot guarantee** the original file has not changed since indexing.
+Automatic scanning is performed separately by the independent indexer.
+
+After updating RAG source code, run `./mcpctl rag enable` from the repository
+root if the bridge is active. It rebuilds the private RAG API **and** the MCP
+container without deleting documents or their index. If RAG is disabled and
+only site-audit improvements are needed, use `./mcpctl mcp apply`.
 
 There is no automatic shared-secret provisioner. Documents are indexed
 by the separate RAG indexer when running. The internal API loads the local
