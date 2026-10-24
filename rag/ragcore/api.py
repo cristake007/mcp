@@ -63,6 +63,27 @@ async def process(request: Request):
             value = await asyncio.to_thread(calculate)
             return JSONResponse(value, headers={"Cache-Control": "no-store"})
 
+        if request.url.path == "/corpus-health":
+            offset = params.get("offset", 0)
+            limit = params.get("limit", 50)
+            if type(offset) is not int or not 0 <= offset <= 100000:
+                raise ValueError("Invalid offset")
+            if type(limit) is not int or not 1 <= limit <= 100:
+                raise ValueError("Invalid limit")
+
+            def scan_health():
+                from pathlib import Path
+                from .health import corpus_health
+                with store.connect() as health_conn:
+                    return corpus_health(
+                        health_conn, Path(os.environ.get("RAG_DOCUMENTS", "/documents")),
+                        offset=offset, limit=limit,
+                    )
+
+            # Hashing many files must not block the private API's event loop.
+            value = await asyncio.to_thread(scan_health)
+            return JSONResponse(value, headers={"Cache-Control": "no-store"})
+
         with store.connect() as conn:
             if request.url.path == "/documents":
                 offset = params.get("offset", 0)
@@ -133,6 +154,7 @@ app = Starlette(routes=[
     Route("/stats", process, methods=["POST"]),
     Route("/documents", process, methods=["POST"]),
     Route("/document-status", process, methods=["POST"]),
+    Route("/corpus-health", process, methods=["POST"]),
 ])
 
 
