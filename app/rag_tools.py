@@ -4,12 +4,14 @@ The MCP process has no RAG Python dependency, file mount, database password
 or database connection. Only enabled explicitly through compose.rag.yaml.
 """
 import asyncio
+import base64
 import json
 import os
 import urllib.error
 import urllib.request
 
 from fastmcp import FastMCP
+from fastmcp.utilities.types import Image
 from app.tool_policy import tool_enabled
 
 
@@ -166,6 +168,42 @@ def register_rag_tools(server: FastMCP) -> None:
         return await asyncio.to_thread(
             _request, "/corpus-health", {"offset": offset, "limit": limit},
         )
+
+    async def get_page_image(document_id: int, page: int):
+        """Return an actual image of a page from a PDF indexed in local RAG.
+
+        Use a PDF page number grounded in search_docs results[].locations
+        (kind='pdf_page', page=N); never infer a page from char offsets.
+        Works only when the original PDF has the SHA-256 saved in PostgreSQL.
+        Returns the source document path and original page number followed by
+        an MCP image block (JPEG rendering of the PDF page). No generated
+        images, OCR, public URLs, external providers, or writable mounts.
+        Client UI image-display support may vary. Image is a complete page,
+        not an automatically cropped figure.
+        """
+        if type(document_id) is not int or document_id < 1:
+            raise ValueError("document_id must be positive")
+        if type(page) is not int or page < 1:
+            raise ValueError("page must be positive")
+        response = await asyncio.to_thread(
+            _request, "/page-image", {"document_id": document_id, "page": page},
+        )
+        encoded = response.pop("image_base64", None)
+        if not isinstance(encoded, str) or response.get("mime_type") != "image/jpeg":
+            raise RuntimeError("Invalid PDF page image response")
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (ValueError, base64.binascii.Error) as exc:
+            raise RuntimeError("Invalid PDF page image data") from exc
+        if not 1 <= len(payload) <= 850_000 or not payload.startswith(b"\xff\xd8"):
+            raise RuntimeError("Invalid PDF page image bytes")
+        description = (
+            f"Imagine originală din documentul RAG: {response['path']}, "
+            f"pagina PDF {response['page']}/{response['total_pages']}. "
+            "Randare a paginii complete din versiunea indexată verificată SHA-256; "
+            "nu este o ilustrație generată de AI."
+        )
+        return [description, Image(data=payload, format="jpeg")]
 
     if tool_enabled("corpus_health"):
         server.tool()(corpus_health)
