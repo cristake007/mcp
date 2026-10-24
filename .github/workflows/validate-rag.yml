@@ -59,6 +59,8 @@ jobs:
       RAG_DB_PASSWORD: ci-only-rag-secret
       RAG_EMBEDDINGS_ENABLED: "0"
       RAG_API_TOKEN: docker-test-long-secret-0123456789abcdef
+      RAG_SCAN_INTERVAL_SECONDS: "10"
+      RAG_SETTLE_SECONDS: "0"
     steps:
       - uses: actions/checkout@v4
       - name: Prepare sample documents
@@ -110,6 +112,38 @@ jobs:
           assert data["exact"] and "ISO 9001" in data["text"], data
           print("PASS: standalone authenticated RAG API")
           PY
+      - name: Verify auto-indexer finds new files and removes deleted files
+        run: |
+          docker compose -f rag/compose.yaml up -d indexer
+          printf 'A newly added document about ISO 14001\n' > rag/documents/subfolder/new-doc.txt
+          success=0
+          for i in $(seq 1 15); do
+            if docker compose -f rag/compose.yaml exec -T indexer python -m ragcore status | grep -q '"documents": 2'; then
+              success=1
+              break
+            fi
+            sleep 3
+          done
+          test "$success" -eq 1 || {
+            docker compose -f rag/compose.yaml logs indexer
+            exit 1
+          }
+          rm rag/documents/subfolder/procedure.txt
+          success=0
+          for i in $(seq 1 15); do
+            if docker compose -f rag/compose.yaml exec -T indexer python -m ragcore search --lexical-only 'ISO 9001' | grep -q '^\[\]
+        run: docker compose -f rag/compose.yaml -f rag/compose.mcp.yaml down
+; then
+              success=1
+              break
+            fi
+            sleep 3
+          done
+          test "$success" -eq 1 || {
+            docker compose -f rag/compose.yaml logs indexer
+            exit 1
+          }
+          docker compose -f rag/compose.yaml exec -T indexer python -m ragcore verify
       - name: Stop RAG stack
         if: always()
         run: docker compose -f rag/compose.yaml -f rag/compose.mcp.yaml down
