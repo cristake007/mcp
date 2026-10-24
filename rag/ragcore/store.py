@@ -497,8 +497,6 @@ def list_documents(conn, *, offset: int = 0, limit: int = 50) -> dict:
         "documents": docs,
         "next_offset": next_offset if next_offset < total else None,
         "source_check": "not_performed",
-        "note": "Metadata din indexul PostgreSQL, nu din fisierele sursa. "
-                "Pentru integritatea fragmentelor foloseste document_status.",
     }
 
 
@@ -596,8 +594,6 @@ def document_status(conn, document_id: int) -> dict:
         "stored_text_coverage_complete": not errors,
         "status": status,
         "source_check": "not_performed",
-        "note": "Verificare doar a textului si fragmentelor stocate. "
-                "Nu confirma actualitatea fisierului original.",
     }
 
 
