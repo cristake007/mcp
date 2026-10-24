@@ -275,6 +275,135 @@ def get_text(conn, document_id: int, start: int | None = None,
     return row["path"], raw[a:b]
 
 
+
+def list_documents(conn, *, offset: int = 0, limit: int = 50) -> dict:
+    """List indexed metadata without reading source files or loading raw text."""
+    if type(offset) is not int or offset < 0 or offset > 100000:
+        raise ValueError("Invalid offset")
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("Invalid limit")
+    init_schema(conn)
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) AS total FROM rag_documents")
+        total = cur.fetchone()["total"]
+        cur.execute(
+            """SELECT d.id, d.path, d.parser, d.embedding_model, d.indexed_at,
+                      length(d.raw_text) AS text_chars,
+                      jsonb_array_length(d.warnings) AS warnings_count,
+                      count(c.id) AS chunks,
+                      count(c.embedding) AS embeddings
+               FROM rag_documents d
+               LEFT JOIN rag_chunks c ON c.document_id = d.id
+               GROUP BY d.id
+               ORDER BY d.path, d.id
+               LIMIT %s OFFSET %s""",
+            (limit, offset),
+        )
+        docs = [{
+            "document_id": row["id"],
+            "path": row["path"],
+            "parser": row["parser"],
+            "indexed_at": row["indexed_at"].isoformat(),
+            "text_chars": row["text_chars"],
+            "chunks": row["chunks"],
+            "embeddings": row["embeddings"],
+            "embedding_model": row["embedding_model"],
+            "warnings_count": row["warnings_count"],
+            "has_warnings": row["warnings_count"] > 0,
+            "potential_issue": (
+                "empty_text" if row["text_chars"] == 0 else
+                "no_chunks" if row["chunks"] == 0 else
+                "missing_embeddings" if row["embedding_model"] != "none"
+                and row["embeddings"] < row["chunks"] else None
+            ),
+        } for row in cur.fetchall()]
+    next_offset = offset + len(docs)
+    return {
+        "total_documents": total, "offset": offset, "limit": limit,
+        "documents": docs,
+        "next_offset": next_offset if next_offset < total else None,
+        "source_check": "not_performed",
+        "note": "Metadata din indexul PostgreSQL, nu din fisierele sursa. "
+                "Pentru integritatea fragmentelor foloseste document_status.",
+    }
+
+
+def document_status(conn, document_id: int) -> dict:
+    """Check exact extracted text coverage and stored embeddings for one document.
+
+    This does not compare the stored hash to a live file: the isolated API
+    intentionally does not mount the source documents.
+    """
+    if type(document_id) is not int or document_id <= 0:
+        raise ValueError("Invalid document ID")
+    init_schema(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT id, path, sha256, parser, raw_text, warnings,
+                      embedding_model, indexed_at
+               FROM rag_documents WHERE id=%s""",
+            (document_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise ValueError(f"Unknown document id: {document_id}")
+        cur.execute(
+            """SELECT ordinal, char_start, char_end, content,
+                      embedding IS NOT NULL AS has_embedding
+               FROM rag_chunks WHERE document_id=%s ORDER BY ordinal""",
+            (document_id,),
+        )
+        chunks = cur.fetchall()
+    from .chunking import Chunk, verify_coverage
+
+    raw_text = row["raw_text"]
+    errors = []
+    expected_ordinals = list(range(len(chunks)))
+    if [item["ordinal"] for item in chunks] != expected_ordinals:
+        errors.append("Non-contiguous chunk ordinals")
+    if any(item["content"] != raw_text[item["char_start"]:item["char_end"]]
+           for item in chunks):
+        errors.append("Chunk content differs from indexed raw text")
+    try:
+        verify_coverage(
+            raw_text, [
+                Chunk(item["char_start"], item["char_end"], item["content"], [])
+                for item in chunks
+            ],
+        )
+    except ValueError as exc:
+        errors.append("Invalid text coverage: " + str(exc)[:250])
+    embeddings = sum(bool(item["has_embedding"]) for item in chunks)
+    if row["embedding_model"] != "none" and embeddings != len(chunks):
+        errors.append("Missing embeddings for indexed model")
+    if row["embedding_model"] == "none" and embeddings:
+        errors.append("Unexpected embeddings for lexical-only index")
+
+    if not raw_text:
+        status = "empty" if not errors else "incomplete"
+    else:
+        status = "indexed_complete" if not errors else "incomplete"
+    return {
+        "document_id": row["id"],
+        "path": row["path"],
+        "source_sha256": row["sha256"],
+        "parser": row["parser"],
+        "indexed_at": row["indexed_at"].isoformat(),
+        "text_chars": len(raw_text),
+        "chunks": len(chunks),
+        "embeddings": embeddings,
+        "embedding_model": row["embedding_model"],
+        "warnings": row["warnings"],
+        "warnings_count": len(row["warnings"]),
+        "integrity_errors": errors,
+        "stored_text_coverage_complete": not errors,
+        "status": status,
+        "source_check": "not_performed",
+        "note": "Verificare doar a textului si fragmentelor stocate. "
+                "Nu confirma actualitatea fisierului original.",
+    }
+
+
 def verify_index(conn) -> dict:
     init_schema(conn)
     with conn.cursor() as cur:
