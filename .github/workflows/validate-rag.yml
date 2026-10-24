@@ -124,6 +124,11 @@ jobs:
           assert health["status"] == "indexed_complete", health
           assert health["stored_text_coverage_complete"], health
           assert health["source_check"] == "not_performed", health
+          inventory = call("/corpus-health", {"offset": 0, "limit": 10}, token)
+          assert inventory["status"] == "healthy", inventory
+          assert inventory["summary"]["current_files"] == 1, inventory
+          assert inventory["summary"]["unindexed_files"] == 0, inventory
+          assert inventory["source_directory_checked"], inventory
           try:
               call("/document-status", {"document_id": 0}, token)
               raise AssertionError("Invalid document ID must be rejected")
