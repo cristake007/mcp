@@ -62,7 +62,7 @@ pre{white-space:pre-wrap;word-break:break-word;margin:5px 0 0;background:var(--b
 <script>
 (() => {
   "use strict";
-  // MCP Apps JSON-RPC bridge. No fetch(), public URL, local PDF parsing, or tokens.
+  // MCP Apps JSON-RPC bridge. No external network, public URL, local PDF parsing, or tokens.
   let serial = 0;
   const pending = new Map();
   const el = id => document.getElementById(id);
