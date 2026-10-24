@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Imagine originală RAG</title>
+<style>
+html,body{margin:0;padding:0;background:transparent}
+body{font-family:system-ui,sans-serif}
+#image{display:block;width:100%;height:auto;max-width:100%;object-fit:contain;border:0}
+#status{display:none;font-size:12px;color:inherit;padding:8px 4px}
+</style>
+</head>
+<body>
+<img id="image" alt="Imagine originală din RAG" hidden>
+<div id="status" role="status" aria-live="polite"></div>
+<script>
+(() => {
+  "use strict";
+  let nextId = 0, latest = 0;
+  const pending = new Map();
+  const image = document.getElementById("image");
+  const status = document.getElementById("status");
+  const notify = (method, params={}) =>
+    window.parent.postMessage({jsonrpc:"2.0",method,params},"*");
+  const call = (method,params={}) => new Promise((resolve,reject) => {
+    const id = ++nextId;
+    pending.set(id,{resolve,reject});
+    window.parent.postMessage({jsonrpc:"2.0",id,method,params},"*");
+  });
+  function unwrap(value){
+    if(value && value.structuredContent) return value.structuredContent;
+    if(value && value.result && typeof value.result==="object") return value.result;
+    if(value && Array.isArray(value.content)){
+      const part=value.content.find(x=>x && x.type==="text" && x.text);
+      if(part){try{return JSON.parse(part.text)}catch(_){}}
+    }
+    return value;
+  }
+  function error(message){
+    image.hidden=true;
+    image.removeAttribute("src");
+    status.textContent=message;
+    status.style.display="block";
+  }
+  async function show(output){
+    const data=unwrap(output);
+    if(!data || !Array.isArray(data.pages))return;
+    const item=data.pages.find(f=>Number.isInteger(f.document_id) && f.document_id>0
+      && Number.isInteger(f.page) && f.page>0
+      && Number.isInteger(f.figure_id) && f.figure_id>0);
+    if(!item){
+      error("Nicio imagine relevantă identificată în RAG.");
+      return;
+    }
+    const current=++latest;
+    image.hidden=true;
+    image.removeAttribute("src");
+    status.style.display="none";
+    try{
+      const result=unwrap(await call("tools/call",{
+        name:"get_rag_page_data",
+        arguments:{
+          document_id:item.document_id,
+          page:item.page,
+          figure_id:item.figure_id
+        }
+      }));
+      if(current!==latest)return;
+      if(!result || result.source_verified!==true
+          ||result.image_kind!=="cropped_original_pdf_figure"
+          ||result.mime_type!=="image/jpeg"
+          ||result.document_id!==item.document_id
+          ||result.page!==item.page
+          ||result.figure_id!==item.figure_id
+          ||typeof result.image_base64!=="string"
+          ||!result.image_base64.length){
+        throw new Error("Imaginea nu a fost verificată.");
+      }
+      image.alt=item.caption||"Figură originală din RAG";
+      image.src="data:image/jpeg;base64,"+result.image_base64;
+      image.hidden=false;
+      status.style.display="none";
+    }catch(_){
+      if(current===latest)error("Figura nu a putut fi afișată prin MCP.");
+    }
+  }
+  window.addEventListener("message",event=>{
+    if(event.source!==window.parent)return;
+    const data=event.data;
+    if(!data||data.jsonrpc!=="2.0")return;
+    if(typeof data.id==="number"&&pending.has(data.id)){
+      const p=pending.get(data.id);
+      pending.delete(data.id);
+      data.error?p.reject(new Error(data.error.message||"MCP error")):p.resolve(data.result);
+      return;
+    }
+    if(data.method==="ui/notifications/tool-result")show(data.params);
+  });
+  call("ui/initialize",{
+    appInfo:{name:"rag-single-figure",version:"3.0.0"},
+    appCapabilities:{},protocolVersion:"2026-01-26"
+  }).then(()=>{
+    notify("ui/notifications/initialized",{});
+    if(window.openai&&window.openai.toolOutput)show(window.openai.toolOutput);
+  }).catch(()=>error("MCP Apps nu este disponibil."));
+})();
+</script>
+</body>
+</html>
