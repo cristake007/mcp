@@ -13,7 +13,7 @@ async def main():
     enabled = os.getenv("MCP_RAG_ENABLED") == "1"
     expected = {"ping", "whoami", "inspect_site"}
     if enabled:
-        expected |= {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status", "corpus_health", "get_page_image"}
+        expected |= {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status", "corpus_health", "get_page_image", "show_rag_sources", "get_rag_page_data"}
     expected -= disabled
     assert tools == expected, (tools, expected)
 
@@ -24,7 +24,7 @@ async def main():
     isolated = FastMCP("optional-tools-test")
     register_rag_tools(isolated)
     custom = {tool.name: tool for tool in await isolated.list_tools()}
-    assert set(custom) == {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status", "corpus_health", "get_page_image"} - disabled
+    assert set(custom) == {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status", "corpus_health", "get_page_image", "show_rag_sources", "get_rag_page_data"} - disabled
     expected = "Art. 15\n  Verificare anuală.\n"
     if "corpus_stats" in custom:
         stats_result = {
