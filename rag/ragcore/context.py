@@ -29,11 +29,19 @@ def _blocks(content: str, start: int) -> list[dict]:
     """Partition the entire returned text, including blank lines and separators."""
     cursor = start
     blocks = []
-    for line in content.splitlines(keepends=True):
-        end = cursor + len(line)
+    lines = content.splitlines(keepends=True)
+    # A document with thousands of short/blank lines must not exceed the
+    # transport size limit just because each line has its own JSON metadata.
+    # Coalesce adjacent lines when necessary; preserve all characters.
+    stride = max(1, (len(lines) + 249) // 250)
+    for index in range(0, len(lines), stride):
+        group = lines[index:index + stride]
+        text = "".join(group)
+        end = cursor + len(text)
         blocks.append({
             "char_start": cursor, "char_end": end,
-            "kind": _line_kind(line), "text": line,
+            "kind": _line_kind(text) if len(group) == 1 else "combined_lines",
+            "text": text,
         })
         cursor = end
     assert cursor == start + len(content)
