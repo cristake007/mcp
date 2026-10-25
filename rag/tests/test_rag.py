@@ -286,6 +286,35 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(text.status_code, 200, text.text)
                     self.assertEqual(text.json()["text"], item["article"]["text"])
                     self.assertTrue(text.json()["exact"])
+                    context = await client.post(
+                        "/context",
+                        json={"document_id": item["document_id"], "limit": 1000},
+                        headers=headers,
+                    )
+                    self.assertEqual(context.status_code, 200, context.text)
+                    reading = context.json()
+                    self.assertEqual(reading["scope"], "full_document")
+                    self.assertTrue(reading["range_complete"])
+                    self.assertIsNone(reading["next_offset"])
+                    self.assertEqual(
+                        "".join(block["text"] for block in reading["blocks"]),
+                        reading["text"],
+                    )
+                    self.assertIn("Art. 34", reading["text"])
+                    self.assertEqual(reading["range_chars"], reading["document_chars"])
+                    self.assertTrue(reading["exact_indexed_text"])
+                    bad_context = await client.post(
+                        "/context",
+                        json={"document_id": item["document_id"],
+                              "limit": 999}, headers=headers,
+                    )
+                    self.assertEqual(bad_context.status_code, 400)
+                    stale_context = await client.post(
+                        "/context",
+                        json={"document_id": item["document_id"],
+                              "expected_hash": "0"*64}, headers=headers,
+                    )
+                    self.assertEqual(stale_context.status_code, 400)
                     bad_range = await client.post(
                         "/text",
                         json={"document_id": item["document_id"], "start": -1},
