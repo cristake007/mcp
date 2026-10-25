@@ -17,6 +17,8 @@ from urllib.parse import quote, urlsplit
 
 from bs4 import BeautifulSoup
 
+from app.site_output import SiteInspectionResult
+
 ROOT = "https://tuvkarpat.ro/"
 SITEMAP_INDEX = ROOT + "sitemap_index.xml"
 USER_AGENT = (
@@ -496,7 +498,7 @@ def inspect_site(
     reviews: list[dict] | None = None,
     queries: list[str] | None = None,
     match_mode: str = "exact",
-) -> dict:
+) -> SiteInspectionResult:
     """Inspect live tuvkarpat.ro through one MCP tool.
 
     sitemaps: list all advertised sitemaps.
