@@ -14,6 +14,76 @@ from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
 from app.tool_policy import tool_enabled
 
+from typing import Literal
+from typing_extensions import TypedDict
+
+
+# Typed contracts for the two reporting tools. The RAG API payloads are
+# forwarded unchanged; FastMCP uses these to publish outputSchema.
+class DocumentStatsExample(TypedDict):
+    document_id: int
+    path: str
+    occurrences_per_term: list[int]
+    matching_articles: int
+
+
+class ArticleStatsExample(TypedDict):
+    document_id: int
+    path: str
+    article: str
+    char_start: int
+    char_end: int
+    occurrences_per_term: list[int]
+
+
+class CorpusStatsResult(TypedDict):
+    terms: list[str]
+    mode: Literal["all", "any"]
+    match_type: Literal["linguistic", "exact"]
+    match_method: str
+    not_semantic: bool
+    exhaustive_counts: bool
+    documents_scanned: int
+    articles_detected: int
+    matching_documents: int
+    matching_articles: int
+    documents_with_matching_articles: int
+    occurrences_per_term: list[int]
+    examples_limit: int
+    document_examples: list[DocumentStatsExample]
+    article_examples: list[ArticleStatsExample]
+    document_examples_truncated: bool
+    article_examples_truncated: bool
+    note: str
+
+
+class IndexedDocument(TypedDict):
+    document_id: int
+    path: str
+    parser: str
+    indexed_at: str
+    text_chars: int
+    chunks: int
+    embeddings: int
+    figures: int
+    ocr_chunks: int
+    orientation_version: int
+    rotated_pages: int
+    embedding_model: str
+    warnings_count: int
+    has_warnings: bool
+    potential_issue: str | None
+
+
+class ListDocsResult(TypedDict):
+    total_documents: int
+    offset: int
+    limit: int
+    documents: list[IndexedDocument]
+    next_offset: int | None
+    source_check: str
+
+
 
 def _request(path: str, payload: dict) -> dict:
     base_url = os.environ.get("MCP_RAG_URL", "").rstrip("/")
@@ -102,7 +172,7 @@ def register_rag_tools(server: FastMCP) -> None:
 
     async def corpus_stats(term: str, second_term: str | None = None,
                            mode: str = "all", examples_limit: int = 10,
-                           match_type: str = "linguistic") -> dict:
+                           match_type: str = "linguistic") -> CorpusStatsResult:
         """Exact counts over ALL indexed RAG documents, not top search hits.
 
         Count Romanian word-family mentions by default (match_type=linguistic),
@@ -139,7 +209,7 @@ def register_rag_tools(server: FastMCP) -> None:
              "match_type": match_type},
         )
 
-    async def list_docs(offset: int = 0, limit: int = 50) -> dict:
+    async def list_docs(offset: int = 0, limit: int = 50) -> ListDocsResult:
         """List indexed RAG documents: paths, chunk/embedding counts and warnings.
 
         Paginated document inventory; follow next_offset for the full list.
