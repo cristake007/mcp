@@ -15,6 +15,82 @@ URLSET = """<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 
 
 class SiteInspectorTests(unittest.TestCase):
+    def test_mcp_output_schema_all_actions(self):
+        """One declared output contract must accept every action unchanged."""
+        import asyncio
+        import hashlib
+        from fastmcp import FastMCP
+        from pydantic import TypeAdapter
+        from app.site_output import SiteInspectionResult
+        from app.site_fields import extract_with_sources
+
+        mcp = FastMCP("site-schema-offline")
+        mcp.tool()(site.inspect_site)
+        tools = asyncio.run(mcp.list_tools())
+        self.assertEqual([tool.name for tool in tools], ["inspect_site"])
+        tool = tools[0]
+        schema = tool.output_schema
+        self.assertEqual(schema["type"], "object")
+        self.assertIn("action", schema["required"])
+        self.assertEqual(len(schema["properties"]["action"]["enum"]), 10)
+        for field in ("pages", "coverage_report", "source_map", "pending_parts",
+                      "query_totals", "entries", "matches", "next_offset", "acf"):
+            self.assertIn(field, schema["properties"])
+        self.assertIn("SiteBatchPage", str(schema))
+        self.assertIn("SiteSourceSpan", str(schema))
+        self.assertIn("SiteBatchCoverage", str(schema))
+        self.assertIn("SiteTermMatch", str(schema))
+
+        site_map = "https://tuvkarpat.ro/cursuri-sitemap.xml"
+        page_url = "https://tuvkarpat.ro/cursuri/test/"
+        page = {
+            "url": page_url, "format": "acf_json", "id": 42,
+            "title": "Curs test", "link": page_url,
+            "acf": {"tematica": "Test pentru audit"},
+        }
+        raw, warnings, _, missing = extract_with_sources(page, None)
+        self.assertEqual((warnings, missing), ([], []))
+        checksum = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        report = {
+            "auditable_urls": 1, "acknowledged_urls": 0,
+            "not_acknowledged_urls": 1, "offset": 0,
+            "entries": [{"url": page_url, "status": "not_acknowledged",
+                         "reviewed_at": None}],
+            "next_offset": None, "status_scope": "persisted_baseline_only",
+            "current_site_freshness_checked": False,
+            "extraction_completed_in_this_report": False,
+            "note": "Baseline only",
+        }
+        cases = [
+            ("sitemaps", {}),
+            ("urls", {"sitemap": "cursuri-sitemap.xml"}),
+            ("get", {"url": page_url, "view": "text",
+                     "fields": ["title", "acf.tematica"]}),
+            ("get", {"url": page_url, "view": "raw"}),
+            ("batch_get", {"sitemap": "cursuri-sitemap.xml", "limit": 1,
+                           "fields": ["title", "acf.tematica"]}),
+            ("audit_changes", {"sitemap": "cursuri-sitemap.xml", "limit": 1}),
+            ("search", {"query": "Test", "sitemap": "cursuri-sitemap.xml"}),
+            ("search_many", {"queries": ["Test"], "sitemap": "cursuri-sitemap.xml"}),
+            ("verify_quote", {"url": page_url, "field": "acf.tematica",
+                              "quote": "Test"}),
+            ("audit_report", {"sitemap": "cursuri-sitemap.xml"}),
+            ("audit_ack", {"url": page_url, "expected_hash": checksum}),
+        ]
+        adapter = TypeAdapter(SiteInspectionResult)
+        with (patch.object(site, "_sitemaps", return_value=[site_map]),
+              patch.object(site, "_urls", return_value=[page_url]),
+              patch.object(site, "_read_page", return_value=page),
+              patch("app.site_audit.get_reviews", return_value={}),
+              patch("app.site_audit.review_coverage", return_value=report),
+              patch("app.site_audit.save_reviews")):
+            for action, params in cases:
+                with self.subTest(action=action, view=params.get("view")):
+                    output = site.inspect_site(action=action, **params)
+                    self.assertEqual(adapter.validate_python(output), output)
+                    result = asyncio.run(tool.run({"action": action, **params}))
+                    self.assertEqual(result.structured_content, output)
+
     def test_fixed_domain_and_redirect_restrictions(self):
         for url in (
             "https://other.example/", "http://tuvkarpat.ro/",
