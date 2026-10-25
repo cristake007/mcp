@@ -47,6 +47,96 @@ class ParserTests(unittest.TestCase):
                 Chunk(1, len(document.raw_text), document.raw_text[1:], [])
             ])
 
+    def test_context_reader_lossless_pagination_and_revision_lock(self):
+        """All source text, including Unicode and blank lines, is recoverable."""
+        import hashlib
+        from ragcore.context import read_context
+
+        parts = [
+            "INTRODUCERE\n",
+            "1. Primul pas: măsurare.\n",
+            "\n",
+            "2. Al doilea pas: verificare.\r\n",
+            "Parametru\\tValoare\n",
+            "Anexă, Țară, Știință — 日本語.\n",
+        ]
+        original = "".join(parts) * 3000
+        variants = (("file.pdf", "pdfplumber"), ("file.docx", "python-docx"),
+                    ("file.pptx", "python-pptx"), ("file.xlsx", "openpyxl"),
+                    ("file.md", "utf8"))
+        for path, parser in variants:
+            with self.subTest(parser=parser):
+                offset, fragments, first = 0, [], None
+                seen = set()
+                while True:
+                    data = read_context(
+                        original, document_id=4, path=path, parser=parser,
+                        warnings=["Some embedded imagery may require OCR"],
+                        offset=offset, limit=1024,
+                        expected_hash=first["sha256"] if first else "",
+                    )
+                    if first is None:
+                        first = data
+                    self.assertEqual(data["scope"], "full_document")
+                    self.assertTrue(data["exact_indexed_text"])
+                    self.assertFalse(data["original_file_completeness_guaranteed"])
+                    self.assertEqual(
+                        "".join(block["text"] for block in data["blocks"]), data["text"],
+                    )
+                    self.assertEqual(
+                        [(block["char_start"], block["char_end"]) for block in data["blocks"]],
+                        [(x, y) for x, y in zip(
+                            [data["char_start"]] +
+                            [block["char_end"] for block in data["blocks"][:-1]],
+                            [block["char_end"] for block in data["blocks"]],
+                        )],
+                    )
+                    fragments.append(data["text"])
+                    if data["next_offset"] is None:
+                        self.assertTrue(data["range_complete"])
+                        self.assertEqual(data["char_end"], len(original))
+                        break
+                    self.assertFalse(data["range_complete"])
+                    self.assertNotIn(data["next_offset"], seen)
+                    seen.add(data["next_offset"])
+                    offset = data["next_offset"]
+                self.assertEqual("".join(fragments), original)
+                self.assertEqual(
+                    first["sha256"], hashlib.sha256(original.encode("utf-8")).hexdigest(),
+                )
+
+        anchor_start = original.find("Al doilea pas", 1000)
+        anchor_end = anchor_start + len("Al doilea pas")
+        self.assertGreater(anchor_start, 0)
+        offset, portions = 0, []
+        while True:
+            data = read_context(
+                original, document_id=4, path="manual.pdf", parser="pdfplumber",
+                warnings=[], start=anchor_start, end=anchor_end,
+                context_chars=2000, offset=offset, limit=1000,
+            )
+            portions.append(data["text"])
+            self.assertEqual(data["scope"], "hit_context")
+            self.assertLess(data["range_end"] - data["range_start"], len(original))
+            if data["next_offset"] is None:
+                break
+            offset = data["next_offset"]
+        self.assertEqual("".join(portions), original[data["range_start"]:data["range_end"]])
+        self.assertIn("Al doilea pas", "".join(portions))
+        self.assertFalse(data["full_document_selected"])
+
+        digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        with self.assertRaisesRegex(ValueError, "revision changed"):
+            read_context(original + "!", document_id=4, path="a.txt", parser="utf8",
+                         warnings=[], expected_hash=digest)
+        for invalid in [{"start": 2}, {"start": 10, "end": 2},
+                        {"offset": len(original) + 1},
+                        {"limit": 500}, {"limit": True},
+                        {"start": False, "end": 1}]:
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                read_context(original, document_id=4, path="a.txt", parser="utf8",
+                             warnings=[], **invalid)
+
     def test_recurse_without_following_links(self):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch) / "documents"
