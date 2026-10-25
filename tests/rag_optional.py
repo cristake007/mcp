@@ -27,10 +27,33 @@ async def main():
     assert set(custom) == {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status", "corpus_health", "get_page_image", "show_rag_sources", "get_rag_page_data"} - disabled
     expected = "Art. 15\n  Verificare anuală.\n"
     if "corpus_stats" in custom:
+        schema = custom["corpus_stats"].output_schema
+        assert schema["type"] == "object"
+        assert {"terms", "matching_documents", "occurrences_per_term",
+                "document_examples", "article_examples", "exhaustive_counts"} <= set(schema["properties"])
+        # Nested examples must have a discoverable schema, not a generic dict.
+        assert "document_id" in str(schema) and "char_start" in str(schema)
         stats_result = {
             "terms": ["autorizare", "suspendare"],
-            "matching_documents": 3, "matching_articles": 1,
-            "exhaustive_counts": True,
+            "mode": "all", "match_type": "linguistic",
+            "match_method": "Romanian Snowball stemming, token-by-token; no semantic inference",
+            "not_semantic": True, "exhaustive_counts": True,
+            "documents_scanned": 3, "articles_detected": 7,
+            "matching_documents": 1, "matching_articles": 1,
+            "documents_with_matching_articles": 1,
+            "occurrences_per_term": [5, 2], "examples_limit": 3,
+            "document_examples": [{
+                "document_id": 14, "path": "manual.pdf",
+                "occurrences_per_term": [5, 2], "matching_articles": 1,
+            }],
+            "article_examples": [{
+                "document_id": 14, "path": "manual.pdf", "article": "Art. 15",
+                "char_start": 100, "char_end": 600,
+                "occurrences_per_term": [3, 1],
+            }],
+            "document_examples_truncated": False,
+            "article_examples_truncated": False,
+            "note": "Counts refer to extracted text, not implied meaning.",
         }
         with patch("app.rag_tools._request", return_value=stats_result) as request:
             result = await custom["corpus_stats"].run({
@@ -46,9 +69,21 @@ async def main():
                 "match_type": "linguistic",
             })
     if "list_docs" in custom:
+        schema = custom["list_docs"].output_schema
+        assert schema["type"] == "object"
+        assert {"total_documents", "offset", "limit", "documents",
+                "next_offset", "source_check"} <= set(schema["properties"])
+        assert "orientation_version" in str(schema) and "potential_issue" in str(schema)
         listing = {
-            "total_documents": 1,
-            "documents": [{"document_id": 14, "path": "manual.pdf", "warnings_count": 0}],
+            "total_documents": 1, "offset": 0, "limit": 10,
+            "documents": [{
+                "document_id": 14, "path": "manual.pdf", "parser": "pdf",
+                "indexed_at": "2026-10-25T11:30:00+00:00",
+                "text_chars": 4000, "chunks": 4, "embeddings": 4,
+                "figures": 2, "ocr_chunks": 2, "orientation_version": 1,
+                "rotated_pages": 0, "embedding_model": "multilingual-e5-small",
+                "warnings_count": 0, "has_warnings": False, "potential_issue": None,
+            }],
             "next_offset": None, "source_check": "not_performed",
         }
         with patch("app.rag_tools._request", return_value=listing) as request:
