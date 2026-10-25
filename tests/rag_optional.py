@@ -26,6 +26,51 @@ async def main():
     custom = {tool.name: tool for tool in await isolated.list_tools()}
     assert set(custom) == {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status", "corpus_health", "get_page_image", "show_rag_sources", "get_rag_page_data"} - disabled
     expected = "Art. 15\n  Verificare anuală.\n"
+    if "search_docs" in custom:
+        schema = custom["search_docs"].output_schema
+        assert schema["type"] == "object"
+        assert set(schema["required"]) == {"results"}
+        properties = schema["properties"]["results"]["items"]["properties"]
+        assert {"document_id", "path", "content", "locations", "article",
+                "source_type", "figure", "ocr_confidence", "char_start"} <= set(properties)
+        assert "page" in str(properties["locations"])
+        assert "figure_id" in str(properties["figure"])
+        # Original text offsets and OCR figure IDs must remain distinct.
+        found = {"results": [
+            {
+                "id": 1, "document_id": 14, "path": "law.pdf",
+                "content": "Art. 15: Verificare anuală.", "char_start": 100,
+                "char_end": 129, "source_type": "original_text",
+                "locations": [{"kind": "pdf_page", "page": 5}],
+                "article": {"label": "15", "char_start": 100, "char_end": 129,
+                            "length": 29, "text": "Art. 15: Verificare anuală."},
+                "rrf_score": 0.04,
+            },
+            {
+                "id": 2, "document_id": 15, "path": "manual.pdf",
+                "content": "Figure: connectors", "char_start": None,
+                "char_end": None, "source_type": "ocr_figure",
+                "locations": [{"kind": "pdf_ocr", "page": 12, "figure_id": 8,
+                               "bbox": [5.5, 3.25, 12.0, 14.0]}],
+                "article": None, "rrf_score": 0.031,
+                "ocr_text": "USB", "ocr_confidence": 81.5,
+                "figure": {"figure_id": 8, "page": 12, "caption": "Connectors",
+                           "kind": "embedded_image", "bbox": [1.0, 2.0, 10.0, 20.0]},
+                "notice": "OCR is fallible",
+            },
+        ]}
+        with patch("app.rag_tools._request", return_value=found) as request:
+            result = await custom["search_docs"].run({"query": "connectors", "limit": 3})
+            assert result.structured_content == found, result
+            request.assert_called_once_with("/search", {"query": "connectors", "limit": 3})
+        with patch("app.rag_tools._request", return_value={"results": []}):
+            result = await custom["search_docs"].run({"query": "absent"})
+            assert result.structured_content == {"results": []}, result
+    if "get_text" in custom:
+        schema = custom["get_text"].output_schema
+        assert schema["type"] == "object"
+        assert {"document_id", "path", "text", "exact",
+                "extraction_notice"} <= set(schema["required"])
     if "corpus_stats" in custom:
         schema = custom["corpus_stats"].output_schema
         assert schema["type"] == "object"
@@ -149,7 +194,8 @@ async def main():
     if "get_text" not in custom:
         return
     with patch("app.rag_tools._request", return_value={
-        "document_id": 1, "path": "test.pdf", "text": expected, "exact": True
+        "document_id": 1, "path": "test.pdf", "text": expected, "exact": True,
+        "extraction_notice": "Literal extracted text; consult original for scan/layout issues",
     }):
         result = await custom["get_text"].run({"document_id": 1, "article": "Art. 15"})
         assert result.structured_content["text"] == expected, result
