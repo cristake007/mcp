@@ -36,10 +36,10 @@ class SiteInspectorTests(unittest.TestCase):
         for field in ("pages", "coverage_report", "source_map", "pending_parts",
                       "query_totals", "entries", "matches", "next_offset", "acf"):
             self.assertIn(field, schema["properties"])
-        self.assertIn("SiteBatchPage", str(schema))
-        self.assertIn("SiteSourceSpan", str(schema))
-        self.assertIn("SiteBatchCoverage", str(schema))
-        self.assertIn("SiteTermMatch", str(schema))
+        self.assertIn("source_map", schema["properties"]["pages"]["items"]["properties"])
+        self.assertIn("content_start", schema["properties"]["source_map"]["items"]["properties"])
+        self.assertIn("requires_followup_urls", schema["properties"]["coverage_report"]["properties"])
+        self.assertIn("positions", schema["properties"]["matches"]["items"]["properties"]["terms"]["items"]["properties"])
 
         site_map = "https://tuvkarpat.ro/cursuri-sitemap.xml"
         page_url = "https://tuvkarpat.ro/cursuri/test/"
