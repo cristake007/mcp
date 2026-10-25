@@ -146,6 +146,39 @@ class GetTextResult(TypedDict):
     extraction_notice: str
 
 
+class ContextBlock(TypedDict):
+    char_start: int
+    char_end: int
+    kind: Literal[
+        "blank", "bullet_candidate", "numbered_item_candidate",
+        "table_like", "heading_candidate", "text_line",
+    ]
+    text: str
+
+
+class DocumentContextResult(TypedDict):
+    document_id: int
+    path: str
+    parser: str
+    scope: Literal["full_document", "hit_context"]
+    text: str
+    blocks: list[ContextBlock]
+    char_start: int
+    char_end: int
+    range_start: int
+    range_end: int
+    range_chars: int
+    document_chars: int
+    sha256: str
+    next_offset: int | None
+    range_complete: bool
+    full_document_selected: bool
+    exact_indexed_text: bool
+    warnings: list[str]
+    original_file_completeness_guaranteed: bool
+    note: str
+
+
 
 def _request(path: str, payload: dict) -> dict:
     base_url = os.environ.get("MCP_RAG_URL", "").rstrip("/")
@@ -194,6 +227,9 @@ def register_rag_tools(server: FastMCP) -> None:
         """Search the optional local document RAG (Romanian FTS + semantic RRF).
 
         Returned content is verbatim extracted text, not a paraphrase.
+        For complete explanations spanning multiple chunks, call
+        get_document_context with source text char_start/char_end, and
+        follow its next_offset for lossless selected-range recovery.
         Each result includes document_id, path, exact chunk [char_start,char_end),
         PDF page or slide if known, and an optional complete legal article.
         If 'article.text_requires_get_text' is true, call get_text with that
@@ -231,6 +267,53 @@ def register_rag_tools(server: FastMCP) -> None:
             _request, "/text",
             {"document_id": document_id, "start": start, "end": end, "article": article},
         )
+
+    async def get_document_context(
+        document_id: int, start: int | None = None, end: int | None = None,
+        offset: int = 0, limit: int = 12000, context_chars: int = 4000,
+        expected_hash: str = "",
+    ) -> DocumentContextResult:
+        """Read continuous, source-faithful text, not isolated search snippets.
+
+        For a long procedure, multi-part comparison or other cross-chunk
+        question, use start+end from a search_docs ORIGINAL-TEXT result to
+        retrieve its surrounding text, preserving every character in scope.
+        For an exhaustive reading, omit start/end and follow next_offset
+        until null: only this mode selects the ENTIRE indexed document.
+        To recover all of a selected range, call again with the SAME
+        document_id, anchor, context_chars, and expected_hash=sha256, plus
+        offset=next_offset. next_offset is an ABSOLUTE character offset.
+        Never treat a single page, a hit-context range, or top search results
+        as the complete source. Use blocks as optional line-shape hints,
+        not authoritative semantic section labels; text is canonical.
+        Documents and extracted text may contain parser warnings or omitted
+        non-text elements (e.g. scanned images). Don't claim lossless
+        reconstruction of original PDF, Word, slides or spreadsheet.
+        OCR figure images use get_page_image or show_rag_sources separately.
+        """
+        if type(document_id) is not int or document_id < 1:
+            raise ValueError("document_id must be a positive integer")
+        if (start is None) != (end is None):
+            raise ValueError("Provide both start and end, or neither")
+        if start is not None and (type(start) is not int or type(end) is not int
+                                  or start < 0 or end <= start):
+            raise ValueError("Invalid original-text anchor interval")
+        if type(offset) is not int or offset < 0:
+            raise ValueError("Invalid offset")
+        if type(limit) is not int or not 1000 <= limit <= 16000:
+            raise ValueError("limit must be between 1000 and 16000")
+        if type(context_chars) is not int or not 0 <= context_chars <= 20000:
+            raise ValueError("context_chars must be between 0 and 20000")
+        if not isinstance(expected_hash, str) or (
+            expected_hash and (len(expected_hash) != 64 or
+                               any(char not in "0123456789abcdef" for char in expected_hash))
+        ):
+            raise ValueError("expected_hash must be lowercase SHA-256")
+        return await asyncio.to_thread(_request, "/context", {
+            "document_id": document_id, "start": start, "end": end,
+            "offset": offset, "limit": limit,
+            "context_chars": context_chars, "expected_hash": expected_hash,
+        })
 
     async def corpus_stats(term: str, second_term: str | None = None,
                            mode: str = "all", examples_limit: int = 10,
@@ -372,6 +455,8 @@ def register_rag_tools(server: FastMCP) -> None:
         server.tool()(search_docs)
     if tool_enabled("get_text"):
         server.tool()(get_text)
+    if tool_enabled("get_document_context"):
+        server.tool()(get_document_context)
     if tool_enabled("corpus_stats"):
         server.tool()(corpus_stats)
 
