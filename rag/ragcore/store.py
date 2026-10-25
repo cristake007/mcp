@@ -420,6 +420,30 @@ def list_figures(conn, document_id: int, page: int) -> list[dict]:
         return cur.fetchall()
 
 
+def get_context(conn, document_id: int, *, start: int | None = None,
+                end: int | None = None, offset: int = 0,
+                limit: int = 12000, context_chars: int = 4000,
+                expected_hash: str = "") -> dict:
+    """Read exact indexed text and explicit continuation without chunk gaps."""
+    from .context import read_context
+
+    init_schema(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id,path,parser,raw_text,warnings FROM rag_documents WHERE id=%s",
+            (document_id,),
+        )
+        item = cur.fetchone()
+    if item is None:
+        raise ValueError(f"Unknown document id: {document_id}")
+    return read_context(
+        item["raw_text"], document_id=item["id"], path=item["path"],
+        parser=item["parser"], warnings=item["warnings"],
+        start=start, end=end, offset=offset, limit=limit,
+        context_chars=context_chars, expected_hash=expected_hash,
+    )
+
+
 def get_text(conn, document_id: int, start: int | None = None,
              end: int | None = None, *, article: str | None = None) -> tuple[str, str]:
     """Return literal extracted text, optionally by legal article label."""
