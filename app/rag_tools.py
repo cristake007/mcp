@@ -15,7 +15,7 @@ from fastmcp.utilities.types import Image
 from app.tool_policy import tool_enabled
 
 from typing import Literal
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 
 # Typed contracts for the two reporting tools. The RAG API payloads are
@@ -84,6 +84,68 @@ class ListDocsResult(TypedDict):
     source_check: str
 
 
+# Search results retain both text and OCR-figure locations. These are source
+# references, not downloadable image URLs; native images remain a separate tool.
+class RagLocation(TypedDict):
+    kind: str
+    page: NotRequired[int]
+    figure_id: NotRequired[int]
+    bbox: NotRequired[list[float]]
+    slide: NotRequired[int]
+    paragraph: NotRequired[int]
+    table: NotRequired[int]
+    row: NotRequired[int]
+    column: NotRequired[int]
+    sheet: NotRequired[str]
+    cell: NotRequired[str]
+
+
+class RagFigure(TypedDict):
+    figure_id: int
+    page: int
+    caption: str
+    kind: str
+    bbox: list[float]
+
+
+class RagArticle(TypedDict):
+    label: str
+    char_start: int
+    char_end: int
+    length: int
+    text: NotRequired[str]
+    text_requires_get_text: NotRequired[bool]
+
+
+class RagSearchHit(TypedDict):
+    id: int
+    document_id: int
+    path: str
+    content: str
+    char_start: int | None
+    char_end: int | None
+    source_type: Literal["original_text", "ocr_figure"]
+    locations: list[RagLocation]
+    article: RagArticle | None
+    rrf_score: float
+    ocr_text: NotRequired[str]
+    ocr_confidence: NotRequired[float]
+    figure: NotRequired[RagFigure]
+    notice: NotRequired[str]
+
+
+class SearchDocsResult(TypedDict):
+    results: list[RagSearchHit]
+
+
+class GetTextResult(TypedDict):
+    document_id: int
+    path: str
+    text: str
+    exact: bool
+    extraction_notice: str
+
+
 
 def _request(path: str, payload: dict) -> dict:
     base_url = os.environ.get("MCP_RAG_URL", "").rstrip("/")
@@ -128,7 +190,7 @@ def _request(path: str, payload: dict) -> dict:
 def register_rag_tools(server: FastMCP) -> None:
     """Called at startup only when MCP_RAG_ENABLED=1."""
 
-    async def search_docs(query: str, limit: int = 6) -> dict:
+    async def search_docs(query: str, limit: int = 6) -> SearchDocsResult:
         """Search the optional local document RAG (Romanian FTS + semantic RRF).
 
         Returned content is verbatim extracted text, not a paraphrase.
@@ -155,7 +217,7 @@ def register_rag_tools(server: FastMCP) -> None:
         return await asyncio.to_thread(_request, "/search", {"query": query, "limit": limit})
 
     async def get_text(document_id: int, start: int | None = None,
-                       end: int | None = None, article: str | None = None) -> dict:
+                       end: int | None = None, article: str | None = None) -> GetTextResult:
         """Return literal extracted document text without any rewriting.
 
         Pass a document_id from search_docs, optionally exact character offsets
