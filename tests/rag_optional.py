@@ -13,7 +13,7 @@ async def main():
     enabled = os.getenv("MCP_RAG_ENABLED") == "1"
     expected = {"ping", "whoami", "inspect_site"}
     if enabled:
-        expected |= {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status", "corpus_health", "get_page_image", "show_rag_sources", "get_rag_page_data"}
+        expected |= {"search_docs", "get_text", "get_document_context", "corpus_stats", "list_docs", "document_status", "corpus_health", "get_page_image", "show_rag_sources", "get_rag_page_data"}
     expected -= disabled
     assert tools == expected, (tools, expected)
 
@@ -24,7 +24,7 @@ async def main():
     isolated = FastMCP("optional-tools-test")
     register_rag_tools(isolated)
     custom = {tool.name: tool for tool in await isolated.list_tools()}
-    assert set(custom) == {"search_docs", "get_text", "corpus_stats", "list_docs", "document_status", "corpus_health", "get_page_image", "show_rag_sources", "get_rag_page_data"} - disabled
+    assert set(custom) == {"search_docs", "get_text", "get_document_context", "corpus_stats", "list_docs", "document_status", "corpus_health", "get_page_image", "show_rag_sources", "get_rag_page_data"} - disabled
     expected = "Art. 15\n  Verificare anuală.\n"
     if "search_docs" in custom:
         schema = custom["search_docs"].output_schema
@@ -66,6 +66,42 @@ async def main():
         with patch("app.rag_tools._request", return_value={"results": []}):
             result = await custom["search_docs"].run({"query": "absent"})
             assert result.structured_content == {"results": []}, result
+    if "get_document_context" in custom:
+        import hashlib
+        schema = custom["get_document_context"].output_schema
+        assert schema["type"] == "object"
+        assert {"text", "blocks", "next_offset", "range_complete", "sha256",
+                "document_chars", "range_start", "range_end", "scope"} <= set(schema["properties"])
+        assert "char_start" in str(schema["properties"]["blocks"])
+        text_value = "Pasul 1: citire.\nPasul 2: verificare.\n"
+        digest = hashlib.sha256(text_value.encode("utf-8")).hexdigest()
+        response = {
+            "document_id": 14, "path": "course.docx", "parser": "python-docx",
+            "scope": "full_document", "text": text_value,
+            "blocks": [
+                {"char_start": 0, "char_end": len("Pasul 1: citire.\n"),
+                 "kind": "text_line", "text": "Pasul 1: citire.\n"},
+                {"char_start": len("Pasul 1: citire.\n"), "char_end": len(text_value),
+                 "kind": "text_line", "text": "Pasul 2: verificare.\n"},
+            ],
+            "char_start": 0, "char_end": len(text_value),
+            "range_start": 0, "range_end": len(text_value),
+            "range_chars": len(text_value), "document_chars": len(text_value),
+            "sha256": digest, "next_offset": None, "range_complete": True,
+            "full_document_selected": True, "exact_indexed_text": True,
+            "warnings": [], "original_file_completeness_guaranteed": False,
+            "note": "All indexed text is present",
+        }
+        with patch("app.rag_tools._request", return_value=response) as request:
+            result = await custom["get_document_context"].run({
+                "document_id": 14, "offset": 0, "limit": 12000,
+            })
+            assert result.structured_content == response, result
+            request.assert_called_once_with("/context", {
+                "document_id": 14, "start": None, "end": None,
+                "offset": 0, "limit": 12000,
+                "context_chars": 4000, "expected_hash": "",
+            })
     if "get_text" in custom:
         schema = custom["get_text"].output_schema
         assert schema["type"] == "object"
