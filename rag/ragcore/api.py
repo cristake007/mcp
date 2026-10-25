@@ -146,6 +146,35 @@ async def process(request: Request):
                 value = store.search(conn, query, limit=limit, use_vectors=enabled())
                 return JSONResponse({"results": value}, headers={"Cache-Control": "no-store"})
 
+            if request.url.path == "/context":
+                document_id = params.get("document_id")
+                start, end = params.get("start"), params.get("end")
+                offset = params.get("offset", 0)
+                limit = params.get("limit", 12000)
+                context_chars = params.get("context_chars", 4000)
+                expected_hash = params.get("expected_hash", "")
+                if type(document_id) is not int or document_id < 1:
+                    raise ValueError("Invalid document_id")
+                if (start is None) != (end is None):
+                    raise ValueError("Provide start and end together")
+                if start is not None and (type(start) is not int or type(end) is not int
+                                          or start < 0 or end <= start):
+                    raise ValueError("Invalid anchor interval")
+                if type(offset) is not int or offset < 0:
+                    raise ValueError("Invalid context offset")
+                if type(limit) is not int or not 1000 <= limit <= 16000:
+                    raise ValueError("Invalid context limit")
+                if type(context_chars) is not int or not 0 <= context_chars <= 20000:
+                    raise ValueError("Invalid context_chars")
+                return JSONResponse(
+                    store.get_context(
+                        conn, document_id, start=start, end=end, offset=offset,
+                        limit=limit, context_chars=context_chars,
+                        expected_hash=expected_hash,
+                    ),
+                    headers={"Cache-Control": "no-store"},
+                )
+
             if request.url.path == "/text":
                 document_id = params.get("document_id")
                 start = params.get("start")
@@ -183,6 +212,7 @@ async def process(request: Request):
 app = Starlette(routes=[
     Route("/search", process, methods=["POST"]),
     Route("/text", process, methods=["POST"]),
+    Route("/context", process, methods=["POST"]),
     Route("/stats", process, methods=["POST"]),
     Route("/documents", process, methods=["POST"]),
     Route("/document-status", process, methods=["POST"]),
