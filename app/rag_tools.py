@@ -151,7 +151,7 @@ class ContextBlock(TypedDict):
     char_end: int
     kind: Literal[
         "blank", "bullet_candidate", "numbered_item_candidate",
-        "table_like", "heading_candidate", "text_line",
+        "table_like", "heading_candidate", "text_line", "combined_lines",
     ]
     text: str
 
