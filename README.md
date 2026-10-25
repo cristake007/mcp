@@ -144,6 +144,39 @@ when selected fields are missing. Sum batch metrics only after processing
 every page, error and continuation part (continuations are not silently
 counted as complete by the initial response).
 
+### Context continuu pentru documente lungi
+
+`search_docs` continuă să folosească fragmente scurte pentru identificarea
+pasajelor. Pentru a evita pierderea contextului, `get_document_context`
+citește direct textul integral **deja extras și indexat** în PostgreSQL, fără
+să recompună fragmente sau să introducă rezumate. Funcționează pentru toate
+formatele acceptate de parser: PDF, DOCX, PPTX, XLSX, TXT, MD.
+
+- Cu `document_id` singur selectează întregul text indexat al documentului.
+- Cu `start` și `end` luate dintr-un rezultat `search_docs` de tip
+  `original_text`, selectează contextul continuu în jurul fragmentului.
+  Aceasta **nu** înseamnă citirea întregului document.
+- Fiecare răspuns include `text` identic cu sursa indexată, `blocks` cu
+  poziții absolute și clasificări orientative (listă, titlu posibil,
+  tabel etc.), `range_start`/`range_end`, `sha256` și `next_offset`.
+  Pentru a recupera toată selecția, repetă apelul cu
+  `offset=next_offset`, aceiași parametri și
+  `expected_hash=sha256`, până când `next_offset` este `null`.
+  Concatenarea exactă a segmentelor reface intervalul indexat fără
+  omisiuni între apeluri; schimbarea versiunii este detectată.
+- `warnings` și `original_file_completeness_guaranteed=false` disting
+  fidelitatea **textului indexat** de fidelitatea fișierului original.
+  Imagini scanate, obiecte grafice, ordine vizuală și alte elemente
+  neextrase nu devin automat disponibile prin acest tool.
+
+Nu necesită reindexare pentru a citi textul deja stocat. Pentru noul endpoint
+din serviciul RAG trebuie aplicate **ambele** containere după `git pull`:
+
+```bash
+./mcpctl mcp apply
+./mcpctl rag enable
+```
+
 The optional RAG tools `list_docs` (paginated index inventory) and
 `document_status` (integrity of one indexed document) use the **existing
 independent RAG PostgreSQL and private API**. They report document ID,
