@@ -91,6 +91,60 @@ class SiteInspectorTests(unittest.TestCase):
                     result = asyncio.run(tool.run({"action": action, **params}))
                     self.assertEqual(result.structured_content, output)
 
+    def test_validation_errors_are_typed_and_self_correcting(self):
+        """Invalid parameters return a retry hint, not a tool traceback."""
+        import asyncio
+        from fastmcp import FastMCP
+        from pydantic import TypeAdapter
+        from app.site_output import SiteInspectionResult
+
+        adapter = TypeAdapter(SiteInspectionResult)
+        samples = [
+            ("batch_get", {"sitemap": "cursuri-sitemap.xml", "limit": 196},
+             "limit", 10),
+            ("search", {"query": "ISO", "limit": 500},
+             "limit", 20),
+            ("urls", {"sitemap": "cursuri-sitemap.xml", "limit": 101},
+             "limit", 100),
+            ("urls", {"sitemap": "cursuri-sitemap.xml", "limit": 0},
+             "limit", 1),
+            ("urls", {"sitemap": "cursuri-sitemap.xml", "limit": True},
+             "limit", 20),
+            ("urls", {"sitemap": "cursuri-sitemap.xml", "limit": "200"},
+             "limit", 20),
+            ("urls", {"sitemap": "cursuri-sitemap.xml", "offset": -2},
+             "offset", 0),
+            ("get", {"url": "https://tuvkarpat.ro/a/", "max_chars": 100},
+             "max_chars", 1000),
+            ("get", {"url": "https://tuvkarpat.ro/a/", "part": -2},
+             "part", 0),
+            ("get", {"url": "https://tuvkarpat.ro/a/", "view": "invalid"},
+             "view", "raw"),
+            ("get", {"url": "https://tuvkarpat.ro/a/", "expected_hash": "abc"},
+             "expected_hash", ""),
+        ]
+        mcp = FastMCP("site-validation-offline")
+        mcp.tool()(site.inspect_site)
+        tool = asyncio.run(mcp.list_tools())[0]
+        self.assertIn("error", tool.output_schema["properties"])
+        self.assertIn("retry_with",
+                      tool.output_schema["properties"]["error"]["properties"])
+        with (patch.object(site, "_sitemaps", side_effect=AssertionError("network called")),
+              patch.object(site, "_read_page", side_effect=AssertionError("network called"))):
+            for action, params, key, suggestion in samples:
+                with self.subTest(action=action, parameter=key, supplied=params[key]):
+                    result = site.inspect_site(action, **params)
+                    self.assertEqual(adapter.validate_python(result), result)
+                    self.assertFalse(result["ok"])
+                    error = result["error"]
+                    self.assertEqual(error["code"], "invalid_parameter")
+                    self.assertEqual(error["parameter"], key)
+                    self.assertIn(key, error["message"])
+                    self.assertIn("Reapelează", error["retry_instruction"])
+                    self.assertEqual(error["retry_with"], {key: suggestion})
+                    execution = asyncio.run(tool.run({"action": action, **params}))
+                    self.assertEqual(execution.structured_content, result)
+
     def test_fixed_domain_and_redirect_restrictions(self):
         for url in (
             "https://other.example/", "http://tuvkarpat.ro/",
