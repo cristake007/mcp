@@ -13,7 +13,7 @@ from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, R
 from starlette.routing import Route
 
 from app.db import get_active_user_id, healthy, user_for_token
-from app.http_security import TokenResourceGuard
+from app.http_security import TokenResourceGuard, Origin403Diagnostics
 from app.oauth import DatabaseOAuthProvider, digest
 from app.tool_policy import tool_enabled
 
@@ -258,6 +258,8 @@ app = mcp.http_app(
 )
 # The underlying SDK does not enforce the resource field at /token.
 app.add_middleware(TokenResourceGuard, resource_url=BASE_URL + "/mcp")
+# Diagnostic runs outside OAuth and DNS-rebinding guards, without bypassing either.
+app.add_middleware(Origin403Diagnostics)
 app.routes.extend([
     Route("/login", get_login, methods=["GET"]),
     Route("/login", post_login, methods=["POST"]),
