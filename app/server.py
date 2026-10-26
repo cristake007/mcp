@@ -25,6 +25,49 @@ if not parsed.hostname or (parsed.scheme != "https" and parsed.hostname not in (
 if len(COOKIE_KEY) < 32 or COOKIE_KEY.startswith("CHANGE_ME"):
     raise RuntimeError("LOGIN_COOKIE_KEY must contain at least 32 random characters")
 
+# Browser-based ChatGPT and the desktop client use origins different from
+# the MCP host. Keep a narrow explicit allowlist; never use "*", "null" or
+# disable Host/Origin protection to fix an OAuth login.
+CHATGPT_CLIENT_ORIGINS = (
+    "https://chatgpt.com",
+    "https://desktop.chat.openai.com",
+    "https://chat.openai.com",
+)
+
+
+def allowed_client_origins() -> list[str]:
+    """Trust exact client origins, with optional administrator-approved extras."""
+    origins = [BASE_URL, *CHATGPT_CLIENT_ORIGINS]
+    for candidate in os.environ.get("MCP_EXTRA_ALLOWED_ORIGINS", "").split(","):
+        origin = candidate.strip().lower()
+        if not origin:
+            continue
+        parsed_origin = urlparse(origin)
+        try:
+            host = parsed_origin.hostname
+            port = parsed_origin.port
+        except ValueError as exc:
+            raise ValueError("Invalid MCP_EXTRA_ALLOWED_ORIGINS port") from exc
+        if (parsed_origin.scheme not in ("https", "http") or not host
+                or parsed_origin.username is not None or parsed_origin.password is not None
+                or parsed_origin.path or parsed_origin.params
+                or parsed_origin.query or parsed_origin.fragment
+                or "*" in origin or origin == "null"):
+            raise ValueError("MCP_EXTRA_ALLOWED_ORIGINS requires exact origin URLs")
+        if parsed_origin.scheme == "http" and host not in ("127.0.0.1", "localhost", "::1"):
+            raise ValueError("Insecure non-loopback MCP client origin is not allowed")
+        # Strictly verify that no unexpected URL syntax was silently normalized.
+        canonical_host = f"[{host}]" if ":" in host else host
+        canonical = f"{parsed_origin.scheme}://{canonical_host}"
+        if port is not None:
+            canonical += f":{port}"
+        if origin != canonical:
+            raise ValueError("MCP_EXTRA_ALLOWED_ORIGINS must contain canonical exact origins")
+        if canonical not in origins:
+            origins.append(canonical)
+    return origins
+
+
 provider = DatabaseOAuthProvider(base_url=BASE_URL)
 
 # MCP's server-level instructions guide the assistant's answers, not the UI.
@@ -211,7 +254,7 @@ app = mcp.http_app(
     json_response=True,
     host_origin_protection=True,
     allowed_hosts=[parsed.hostname, "127.0.0.1", "localhost"],
-    allowed_origins=[BASE_URL],
+    allowed_origins=allowed_client_origins(),
 )
 # The underlying SDK does not enforce the resource field at /token.
 app.add_middleware(TokenResourceGuard, resource_url=BASE_URL + "/mcp")
