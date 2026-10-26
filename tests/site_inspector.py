@@ -142,8 +142,13 @@ class SiteInspectorTests(unittest.TestCase):
                     self.assertIn(key, error["message"])
                     self.assertIn("Reapelează", error["retry_instruction"])
                     self.assertEqual(error["retry_with"], {key: suggestion})
-                    execution = asyncio.run(tool.run({"action": action, **params}))
-                    self.assertEqual(execution.structured_content, result)
+                    # FastMCP/Pydantic may reject wrong input types before
+                    # invoking the function; validate this typed payload
+                    # directly, and exercise MCP for schema-valid inputs.
+                    if type(params[key]) in (int, str):
+                        if key != "limit" or type(params[key]) is int:
+                            execution = asyncio.run(tool.run({"action": action, **params}))
+                            self.assertEqual(execution.structured_content, result)
 
     def test_fixed_domain_and_redirect_restrictions(self):
         for url in (
