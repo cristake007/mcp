@@ -69,8 +69,21 @@ async def main():
         ) as client:
             host_rejected = await client.get("/healthz", headers={"Host": "evil.example"})
             assert host_rejected.status_code == 421, host_rejected.text
-            origin_rejected = await client.get("/healthz", headers={"Origin": "https://evil.example"})
+            from unittest.mock import patch
+            with patch("builtins.print") as emit:
+                origin_rejected = await client.get(
+                    "/healthz", headers={"Origin": "https://evil.example"},
+                )
             assert origin_rejected.status_code == 403, origin_rejected.text
+            diagnostic = [
+                str(call.args[0]) for call in emit.call_args_list
+                if call.args and str(call.args[0]).startswith("MCP_HTTP_403 ")
+            ]
+            assert len(diagnostic) == 1, diagnostic
+            assert '"origin": "https://evil.example"' in diagnostic[0]
+            assert '"path": "/healthz"' in diagnostic[0]
+            assert "password" not in diagnostic[0]
+            assert "ticket" not in diagnostic[0]
             assert "https://chatgpt.com" in allowed_client_origins()
             assert "https://desktop.chat.openai.com" in allowed_client_origins()
             for origin in (
