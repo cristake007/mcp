@@ -531,23 +531,80 @@ def inspect_site(
       with missing fields, warnings, failed URLs, unfinished text parts.
     Diacritics and grammar must be interpreted by the LLM, not this tool.
     """
-    if action not in ("sitemaps", "urls", "get", "batch_get", "search",
-                      "search_many", "verify_quote", "audit_changes", "audit_ack",
-                      "audit_report"):
-        raise ValueError("Acțiune invalidă: sitemaps, urls, get, batch_get, "
-                         "search, search_many, verify_quote, audit_changes, audit_ack, audit_report")
-    if not 0 <= offset <= 100000:
-        raise ValueError("offset trebuie să fie între 0 și 100000")
-    if not 1 <= limit <= 100:
-        raise ValueError("limit trebuie să fie între 1 și 100")
-    if not 1000 <= max_chars <= 250000:
-        raise ValueError("max_chars trebuie să fie între 1000 și 250000")
-    if part < 0:
-        raise ValueError("part trebuie să fie >= 0")
-    if expected_hash and not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
-        raise ValueError("expected_hash trebuie să fie un SHA-256 hexadecimal")
+    valid_actions = ("sitemaps", "urls", "get", "batch_get", "search",
+                     "search_many", "verify_quote", "audit_changes", "audit_ack",
+                     "audit_report")
+    if not isinstance(action, str) or action not in valid_actions:
+        raise ValueError(
+            "inspect_site: acțiune invalidă; folosește una dintre: "
+            + ", ".join(valid_actions)
+        )
+
+    # Return a typed, recoverable error instead of a FastMCP traceback for
+    # malformed common parameters. A failed call never fetches or audits data.
+    def invalid(parameter: str, value, expected: str, replacement) -> SiteInspectionResult:
+        return {
+            "action": action, "ok": False,
+            "error": {
+                "code": "invalid_parameter",
+                "parameter": parameter,
+                "message": (
+                    f"Parametrul '{parameter}' este invalid: {value!r}. "
+                    f"Valoare permisă: {expected}. "
+                    f"Reapelează inspect_site cu {parameter}={replacement!r}."
+                ),
+                "expected": expected,
+                "received": repr(value)[:120],
+                "retry_with": {parameter: replacement},
+                "retry_instruction": (
+                    "Reapelează inspect_site cu valoarea din retry_with, "
+                    "păstrând action și toți ceilalți parametri ai cererii inițiale. "
+                    "Nu considera cererea curentă drept executată."
+                ),
+            },
+        }
+
+    if type(offset) is not int or not 0 <= offset <= 100000:
+        recommended = (max(0, min(offset, 100000))
+                       if type(offset) is int else 0)
+        return invalid("offset", offset, "număr întreg între 0 și 100000", recommended)
+    if type(limit) is not int or not 1 <= limit <= 100:
+        # Existing behavior is unchanged: batch_* processes at most 10 per
+        # call and search* at most 20, even for higher valid requested limits.
+        effective_limit = (10 if action in ("batch_get", "audit_changes")
+                           else 20 if action in ("search", "search_many")
+                           else 100 if action in ("urls", "audit_report") else 20)
+        recommended = (1 if type(limit) is int and limit < 1
+                       else effective_limit)
+        return invalid(
+            "limit", limit,
+            "număr întreg între 1 și 100; batch_get/audit_changes: maxim 10 "
+            "URL-uri procesate pe apel; search/search_many: maxim 20 URL-uri "
+            "scanate pe apel. Pentru restul folosește next_offset când există",
+            recommended,
+        )
+    if type(max_chars) is not int or not 1000 <= max_chars <= 250000:
+        recommended = (
+            max(1000, min(max_chars, 250000)) if type(max_chars) is int
+            else 12000 if action in ("batch_get", "audit_changes") else 60000
+        )
+        return invalid(
+            "max_chars", max_chars, "număr întreg între 1000 și 250000; "
+            "batch_get/audit_changes returnează maxim 12000 caractere "
+            "per pagină per apel, cu restul prin get + next_part",
+            recommended,
+        )
+    if type(part) is not int or part < 0:
+        return invalid("part", part, "număr întreg nenegativ; la continuare folosește next_part", 0)
+    if (not isinstance(expected_hash, str)
+            or (expected_hash and not re.fullmatch(r"[0-9a-f]{64}", expected_hash))):
+        return invalid(
+            "expected_hash", expected_hash, "șir gol sau SHA-256 hexadecimal "
+            "din răspunsul inițial", "",
+        )
     if view not in ("raw", "text"):
-        raise ValueError("view trebuie să fie raw sau text")
+        return invalid("view", view, "'raw' sau 'text'", "raw")
+
 
     from app.site_fields import normalize_fields, extract_with_sources, slice_sources
     selectors = normalize_fields(fields)
