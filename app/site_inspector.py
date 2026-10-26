@@ -529,6 +529,14 @@ def inspect_site(
       does not re-fetch pages or assert that their content is still current.
     Each batch_get/audit_changes response includes per-batch coverage_report
       with missing fields, warnings, failed URLs, unfinished text parts.
+    Valid numeric bounds: offset 0..100000; limit 1..100; max_chars
+      1000..250000; part >= 0. Request at most 10 pages per batch_get or
+      audit_changes; search and search_many scan at most 20 URLs per call.
+      Use next_offset/next_part for the remainder, not an oversized limit.
+    On invalid common parameters, returns ok=false and an error with
+      parameter, accepted range and retry_with correction. Repeat the
+      same action and unchanged other parameters with retry_with applied;
+      the rejected call has fetched zero pages.
     Diacritics and grammar must be interpreted by the LLM, not this tool.
     """
     valid_actions = ("sitemaps", "urls", "get", "batch_get", "search",
