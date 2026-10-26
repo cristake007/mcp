@@ -30,10 +30,13 @@ class Origin403Diagnostics:
                 headers = dict(scope.get("headers") or [])
                 raw = headers.get(b"origin", b"")
                 origin = raw.decode("utf-8", errors="replace").strip()
-                parsed_origin = urlsplit(origin)
+                try:
+                    parsed_origin = urlsplit(origin)
+                except ValueError:
+                    parsed_origin = None
                 if origin == "null":
                     observed_origin = "null"
-                elif (parsed_origin.scheme and parsed_origin.netloc
+                elif (parsed_origin is not None and parsed_origin.scheme and parsed_origin.netloc
                       and not parsed_origin.path and not parsed_origin.query
                       and not parsed_origin.fragment
                       and not parsed_origin.username
