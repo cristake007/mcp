@@ -15,7 +15,7 @@ from app.manage import set_user, disable_user, enable_user, cleanup, list_client
 from app.db import connection, init_db
 from app.oauth import digest, approved_redirect
 from app.http_security import same_resource
-from app.server import app, get_login_ip
+from app.server import app, get_login_ip, allowed_client_origins
 from starlette.requests import Request
 
 
@@ -71,8 +71,16 @@ async def main():
             assert host_rejected.status_code == 421, host_rejected.text
             origin_rejected = await client.get("/healthz", headers={"Origin": "https://evil.example"})
             assert origin_rejected.status_code == 403, origin_rejected.text
-            origin_accepted = await client.get("/healthz", headers={"Origin": "https://mcp.cursurituv.ro"})
-            assert origin_accepted.status_code == 200, origin_accepted.text
+            assert "https://chatgpt.com" in allowed_client_origins()
+            assert "https://desktop.chat.openai.com" in allowed_client_origins()
+            for origin in (
+                "https://mcp.cursurituv.ro",
+                "https://chatgpt.com",
+                "https://desktop.chat.openai.com",
+                "https://chat.openai.com",
+            ):
+                response = await client.get("/healthz", headers={"Origin": origin})
+                assert response.status_code == 200, (origin, response.text)
 
             metadata = await client.get("/.well-known/oauth-authorization-server")
             assert metadata.status_code == 200, (metadata.status_code, metadata.text)
