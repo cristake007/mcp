@@ -127,8 +127,20 @@ class SiteAuditEntry(TypedDict):
     reviewed_at: str | None
 
 
+class SiteInputError(TypedDict):
+    code: Literal["invalid_parameter"]
+    parameter: Literal["offset", "limit", "max_chars", "part", "expected_hash", "view"]
+    message: str
+    expected: str
+    received: str
+    retry_with: dict[str, int | str]
+    retry_instruction: str
+
+
 class SiteInspectionResult(TypedDict):
     action: SiteAction
+    ok: NotRequired[bool]
+    error: NotRequired[SiteInputError]
     # All other fields are action-specific. None are injected or rewritten.
     sitemaps: NotRequired[list[str]]
     sitemap: NotRequired[str]
