@@ -509,9 +509,20 @@ their remaining expiry.
 
 FastMCP 4.1's native Host/Origin guard is enabled for all HTTP routes.
 The public MCP hostname is allowed, along with container-local loopback for
-Docker health checks. Browser requests with an unrelated Origin or Host are
-rejected before authorization. Nginx must continue passing the original
-Host header (proxy_set_header Host $host).
+Docker health checks. The exact ChatGPT browser/desktop origins
+`https://chatgpt.com`, `https://desktop.chat.openai.com` and
+`https://chat.openai.com` are also trusted for requests with an `Origin`
+header (some desktop OAuth flows send this header). Requests from unrelated
+origins still receive HTTP 403 before the login form or authorization starts.
+Nginx must continue passing the original Host header
+(`proxy_set_header Host $host`).
+
+If another trusted client has a different confirmed HTTP origin, specify
+`MCP_EXTRA_ALLOWED_ORIGINS` in the root `.env` as comma-separated **exact
+origins**, then run `./mcpctl mcp apply`. HTTPS is required except for
+loopback clients. No wildcards or `null` origins are permitted. This is
+separate from the `OAUTH_ALLOWED_REDIRECT_HOSTS` callback-host allowlist.
+Do not turn off `host_origin_protection` to diagnose a desktop sign-in error.
 
 After updating, verify the public health check and a NEW ChatGPT OAuth
 connection (the latter tests authorization and token exchange, not only DB):
