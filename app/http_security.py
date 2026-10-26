@@ -6,6 +6,62 @@ RFC 8707 before either grant is processed; other routes are unchanged.
 """
 from urllib.parse import parse_qs, urlsplit
 
+
+class Origin403Diagnostics:
+    """Log only metadata for 403 responses; never log OAuth tickets or secrets.
+
+    The FastMCP origin guard may reject a macOS browser request before the
+    OAuth login handler runs. Nginx logs normally omit the Origin header, so
+    this limited record lets administrators identify the exact legitimate
+    origin without weakening the security guard.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        async def send_checked(message):
+            if message["type"] == "http.response.start" and message["status"] == 403:
+                # Never log cookies, authorization codes, request bodies,
+                # OAuth ticket query parameters, bearer tokens or user data.
+                headers = dict(scope.get("headers") or [])
+                raw = headers.get(b"origin", b"")
+                origin = raw.decode("utf-8", errors="replace").strip()
+                parsed_origin = urlsplit(origin)
+                if origin == "null":
+                    observed_origin = "null"
+                elif (parsed_origin.scheme and parsed_origin.netloc
+                      and not parsed_origin.path and not parsed_origin.query
+                      and not parsed_origin.fragment
+                      and not parsed_origin.username
+                      and not parsed_origin.password):
+                    observed_origin = parsed_origin.scheme + "://" + parsed_origin.netloc[:190]
+                elif not origin:
+                    observed_origin = "<absent>"
+                else:
+                    observed_origin = "<malformed>"
+                path = scope.get("path", "")
+                # Only fixed path labels: no user-controlled query strings.
+                path = path if path in (
+                    "/login", "/authorize", "/token", "/register", "/mcp",
+                    "/healthz", "/.well-known/oauth-authorization-server",
+                    "/.well-known/oauth-protected-resource/mcp",
+                ) else "<other>"
+                import json
+                print("MCP_HTTP_403 " + json.dumps({
+                    "method": scope.get("method", ""),
+                    "path": path,
+                    "origin": observed_origin,
+                }, ensure_ascii=True), flush=True)
+            await send(message)
+
+        await self.app(scope, receive, send_checked)
+
+
+
 from starlette.responses import JSONResponse
 
 
