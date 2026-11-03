@@ -3,6 +3,12 @@
 Uses the same browser headers and curl transport that were validated manually.
 No RAG, embeddings, database, arbitrary shell expressions or external domains.
 """
+import contextvars
+import functools
+import inspect
+import tempfile
+import uuid
+from datetime import datetime, timezone
 import hashlib
 import json
 import re
@@ -31,6 +37,42 @@ REMOVE_HTML = (
     ".elementor-location-header, .elementor-location-footer"
 )
 MAX_SOURCE_BYTES = 4_000_000
+_REFRESH = contextvars.ContextVar("site_refresh", default=False)
+_EVIDENCE = contextvars.ContextVar("site_evidence", default=None)
+_EXACT_URL = contextvars.ContextVar("site_exact_url", default=False)
+
+
+def _refresh_scope(function):
+    signature = inspect.signature(function)
+
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        token = _REFRESH.set(signature.bind_partial(*args, **kwargs).arguments.get("force_refresh", False))
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _REFRESH.reset(token)
+    return wrapped
+
+
+def _load_page(url, force_refresh=False, exact_url=False):
+    refresh = _REFRESH.set(force_refresh)
+    identity = _EXACT_URL.set(exact_url)
+    evidence = []
+    token = _EVIDENCE.set(evidence)
+    try:
+        data = _read_page(url)
+        return data, {
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            # A MISS/BYPASS or absence of cache headers does not prove origin.
+            "provenance": "cache" if any(e["cache_hit"] for e in evidence) else "unknown",
+            "http_evidence": evidence,
+        }
+    finally:
+        _EVIDENCE.reset(token)
+        _REFRESH.reset(refresh)
+        _EXACT_URL.reset(identity)
+
 
 # Short-lived sitemap-only cache avoids two redundant requests per batch.
 # Live page/ACF data are still retrieved anew every time.
@@ -43,7 +85,7 @@ def _sitemap_xml(url: str) -> str:
     url = _allowed(url)
     with _SITEMAP_CACHE_LOCK:
         cached = _SITEMAP_CACHE.get(url)
-        if cached and time.monotonic() - cached[0] < _SITEMAP_TTL_SECONDS:
+        if not _REFRESH.get() and cached and time.monotonic() - cached[0] < _SITEMAP_TTL_SECONDS:
             return cached[1]
     payload = _fetch(url, "application/xml,text/xml,*/*")
     # Never cache broken or non-sitemap HTML challenges.
@@ -80,6 +122,13 @@ def _allowed(url: str) -> str:
 def _fetch(url: str, accept: str = "text/html,*/*") -> str:
     """Execute a fixed, non-shell curl invocation; do not follow redirects."""
     url = _allowed(url)
+    refresh = _REFRESH.get()
+    headers_file = tempfile.TemporaryFile() if refresh else None
+    extra = []
+    if refresh:
+        url += ("&" if "?" in url else "?") + "_mcp_refresh=" + uuid.uuid4().hex
+        extra = ["-H", "Cache-Control: no-cache, no-store, max-age=0",
+                 "-H", "Pragma: no-cache", "-D", "/dev/fd/" + str(headers_file.fileno())]
     try:
         result = subprocess.run(
             [
@@ -90,14 +139,37 @@ def _fetch(url: str, accept: str = "text/html,*/*") -> str:
                 "-H", "Accept: " + accept,
                 "-H", "Referer: " + ROOT,
                 "-w", "\n%{http_code}",
-                url,
+                *extra, url,
             ],
             capture_output=True,
             timeout=23,
             check=False,
+            **({"pass_fds": (headers_file.fileno(),)} if refresh else {}),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError("Cererea către site a eșuat sau a expirat") from exc
+    finally:
+        if headers_file is not None:
+            headers_file.seek(0)
+            raw_headers = headers_file.read().decode("iso-8859-1")
+            headers_file.close()
+            headers = {}
+            for line in raw_headers.splitlines():
+                if line.startswith("HTTP/"):
+                    headers = {}
+                elif ":" in line:
+                    key, value = line.split(":", 1)
+                    headers[key.lower()] = value.strip()
+            observed = {k: v for k, v in headers.items() if k in (
+                "age", "cf-cache-status", "x-cache", "x-cache-status",
+                "x-litespeed-cache", "x-proxy-cache", "cache-control", "via")}
+            hit = any("hit" in v.lower() or "stale" in v.lower()
+                      for k, v in observed.items() if k not in ("cache-control", "via"))
+            hit = hit or (headers.get("age", "").isdigit() and int(headers["age"]) > 0)
+            evidence = _EVIDENCE.get()
+            if evidence is not None:
+                evidence.append({"url": url.split("_mcp_refresh=")[0].rstrip("?&"),
+                                 "headers": observed, "cache_hit": hit})
     if result.returncode:
         detail = result.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError("curl a eșuat: " + (detail[:250] or str(result.returncode)))
@@ -196,6 +268,8 @@ def _api_item(kind: str, url: str) -> dict | None:
     payload = json.loads(_fetch(endpoint, "application/json"))
     if not isinstance(payload, list):
         raise RuntimeError("Răspuns REST API invalid")
+    if payload and _EXACT_URL.get() and payload[0].get("link") != url:
+        raise ValueError("URL-ul REST nu corespunde exact URL-ului observației")
     return payload[0] if payload else None
 
 
@@ -355,12 +429,13 @@ def _page_chunks(content: str, part: int, size: int, expected_hash: str = "") ->
     }
 
 
-def _batch_page(url: str, chars_per_page: int, fields: tuple[str, ...] | None = None) -> dict:
+def _batch_page(url: str, chars_per_page: int, fields: tuple[str, ...] | None = None, force_refresh: bool = False) -> dict:
     from app.site_fields import extract_with_sources, slice_sources
-    data = _read_page(url)
+    data, metadata = _load_page(url, force_refresh)
     text, warnings, spans, missing = extract_with_sources(data, fields)
     chunks = _page_chunks(text, 0, chars_per_page)
     return {
+        **metadata,
         "url": url,
         "format": data["format"],
         "id": data.get("id"),
@@ -371,6 +446,7 @@ def _batch_page(url: str, chars_per_page: int, fields: tuple[str, ...] | None = 
         "retrieve_remaining": (
             {"action": "get", "url": url, "view": "text",
              "part": 1, "max_chars": chars_per_page,
+             **({"force_refresh": True} if force_refresh else {}),
              "expected_hash": chunks["sha256"],
              "fields": list(fields) if fields is not None else None}
             if chunks["next_part"] is not None else None
@@ -481,6 +557,92 @@ def _search_entries(sitemap: str) -> list[tuple[str, str]]:
     return entries
 
 
+def _quote_matches(text, spans, quote, cap=None):
+    matches = []
+    total = 0
+    for span in spans:
+        value = text[span["content_start"]:span["content_end"]]
+        cursor = 0
+        while True:
+            pos = value.find(quote, cursor)
+            if pos < 0:
+                break
+            total += 1
+            if cap is None or len(matches) < cap:
+                matches.append({
+                    "field": span["field"], "start": pos, "end": pos + len(quote),
+                    "context": value[max(0, pos - 80):pos + len(quote) + 80],
+                })
+            cursor = pos + 1 if cap is None else pos + len(quote)
+    return total, matches
+
+
+def _verify_findings(findings, selectors, force_refresh):
+    from app.site_fields import extract_with_sources, normalize_fields
+    if not isinstance(findings, list) or not 1 <= len(findings) <= 100:
+        raise ValueError("verify_findings necesită 1..100 observații")
+    pages = {}
+    results = []
+    for finding in findings:
+        result = {"status": "error"}
+        if isinstance(finding, dict):
+            result.update({k: finding[k] for k in (
+                "url", "field", "original", "replacement", "expected_hash") if k in finding})
+        try:
+            if not isinstance(finding, dict):
+                raise ValueError("Observația trebuie să fie un obiect")
+            item_url = _allowed(finding.get("url"))
+            field = finding.get("field")
+            normalized = normalize_fields([field])
+            if normalized[0] != field:
+                raise ValueError("field trebuie să fie calea exactă din source_map")
+            original = finding.get("original")
+            if not isinstance(original, str) or not 1 <= len(original) <= 10000:
+                raise ValueError("original trebuie să conțină 1..10000 caractere")
+            if not isinstance(finding.get("replacement"), str):
+                raise ValueError("replacement trebuie să fie text")
+            expected = finding.get("expected_hash", "")
+            if not isinstance(expected, str) or (expected and not re.fullmatch(r"[0-9a-f]{64}", expected)):
+                raise ValueError("expected_hash invalid")
+            if item_url not in pages:
+                try:
+                    pages[item_url] = _load_page(item_url, force_refresh, exact_url=True)
+                except (RuntimeError, ValueError) as exc:
+                    pages[item_url] = exc
+            page = pages[item_url]
+            if isinstance(page, Exception):
+                raise page
+            data, metadata = page
+            result.update(metadata)
+            # REST slug lookup alone does not establish exact course identity.
+            if data.get("link", item_url) != item_url:
+                raise ValueError("URL-ul REST nu corespunde exact URL-ului observației")
+            full, warnings, spans, _ = extract_with_sources(data)
+            content, hash_warnings, _, missing = extract_with_sources(data, selectors)
+            result.update(sha256=_page_chunks(content, 0, max(1, len(content)))["sha256"],
+                          warnings=warnings + hash_warnings, missing_fields=missing)
+            if warnings or hash_warnings or missing or data.get("content_complete") is False:
+                raise ValueError("Sursa nu a putut fi citită integral")
+            exact = [span for span in spans if span["field"] == field]
+            count, matches = _quote_matches(full, exact, original)
+            result.update(occurrences=count, matches=matches)
+            if expected and expected != result["sha256"]:
+                result["status"] = "content_changed"
+            elif not exact:
+                result["status"] = "field_not_found"
+            else:
+                result["status"] = "verified" if count else "not_found"
+        except (ValueError, RuntimeError, TypeError, KeyError) as exc:
+            result.update(status="error", error=str(exc)[:300])
+        results.append(result)
+    return {"action": "verify_findings", "results": results,
+            "fields": list(selectors) if selectors is not None else None,
+            "note": "verified confirmă numai prezența exactă în textul vizibil al câmpului; "
+                    "nu confirmă corectitudinea lingvistică. Hash-ul folosește selecția fields "
+                    "din get(view='text'). Pozițiile sunt caractere Unicode, cu end exclusiv."}
+
+
+@_refresh_scope
 def inspect_site(
     action: str,
     url: str = "",
@@ -498,9 +660,18 @@ def inspect_site(
     reviews: list[dict] | None = None,
     queries: list[str] | None = None,
     match_mode: str = "exact",
+    force_refresh: bool = False,
+    findings: list[dict] | None = None,
 ) -> SiteInspectionResult:
     """Inspect live tuvkarpat.ro through one MCP tool.
 
+    force_refresh: bypass MCP caches and request HTTP revalidation with a unique
+      request URL. Intermediaries may ignore it; provenance remains unknown unless
+      cache evidence is observed. No cached fallback on failure.
+    verify_findings: 1..100 exact URL/field/original/replacement observations;
+      optional expected_hash uses the same text/fields hash as get(view='text').
+      Reads each URL once; offsets are Unicode positions in visible field text.
+      verified confirms presence only, never linguistic correctness.
     sitemaps: list all advertised sitemaps.
     urls: paginated URLs for an explicit sitemap.
     get: retrieve a URL, view='raw' for HTML / ACF, view='text' for all
@@ -541,7 +712,7 @@ def inspect_site(
     """
     valid_actions = ("sitemaps", "urls", "get", "batch_get", "search",
                      "search_many", "verify_quote", "audit_changes", "audit_ack",
-                     "audit_report")
+                     "audit_report", "verify_findings")
     if not isinstance(action, str) or action not in valid_actions:
         raise ValueError(
             "inspect_site: acțiune invalidă; folosește una dintre: "
@@ -572,6 +743,8 @@ def inspect_site(
             },
         }
 
+    if type(force_refresh) is not bool:
+        return invalid("force_refresh", force_refresh, "boolean", False)
     if type(offset) is not int or not 0 <= offset <= 100000:
         recommended = (max(0, min(offset, 100000))
                        if type(offset) is int else 0)
@@ -617,6 +790,9 @@ def inspect_site(
     from app.site_fields import normalize_fields, extract_with_sources, slice_sources
     selectors = normalize_fields(fields)
 
+    if action == "verify_findings":
+        return _verify_findings(findings, selectors, force_refresh)
+
     if action == "verify_quote":
         if not url:
             raise ValueError("verify_quote necesită url")
@@ -625,23 +801,7 @@ def inspect_site(
             raise ValueError("quote trebuie să conțină 1..500 caractere")
         data = _read_page(url)
         text, warnings, spans, missing = extract_with_sources(data, field_selector)
-        matches = []
-        total_matches = 0
-        for span in spans:
-            value = text[span["content_start"]:span["content_end"]]
-            cursor = 0
-            while True:
-                pos = value.find(quote, cursor)
-                if pos == -1:
-                    break
-                total_matches += 1
-                if len(matches) < 20:
-                    matches.append({
-                        "field": span["field"], "start": pos,
-                        "end": pos + len(quote),
-                        "context": value[max(0, pos - 80):min(len(value), pos + len(quote) + 80)],
-                    })
-                cursor = pos + len(quote)
+        total_matches, matches = _quote_matches(text, spans, quote, cap=20)
         return {
             "action": action, "url": url, "field": field_selector[0],
             "quote": quote, "verified": total_matches > 0,
@@ -720,12 +880,12 @@ def inspect_site(
     if action == "get":
         if not url:
             raise ValueError("Precizează url")
-        data = _read_page(url)
+        data, metadata = _load_page(url, force_refresh)
         if view == "text":
             text, warnings, spans, missing = extract_with_sources(data, selectors)
             chunks = _page_chunks(text, part, max_chars, expected_hash)
             return {
-                "action": action, "url": url, "view": view,
+                "action": action, **metadata, "url": url, "view": view,
                 "format": data["format"], "warnings": warnings,
                 "missing_fields": missing,
                 "fields": list(selectors) if selectors is not None else None,
@@ -740,18 +900,18 @@ def inspect_site(
             chunks = _page_chunks(payload, part, max_chars, expected_hash)
             if chunks["total_parts"] == 1:
                 return {
-                    "action": action, **data, "content_complete": True,
+                    "action": action, **data, **metadata, "content_complete": True,
                     "total_chars": chunks["total_chars"], "total_parts": 1,
                     "part": 0, "sha256": chunks["sha256"],
                 }
             return {
-                "action": action, "url": url, "format": "acf_json",
+                "action": action, **metadata, "url": url, "format": "acf_json",
                 "encoding": "json", "fragment": chunks["content"],
                 **{k: v for k, v in chunks.items() if k != "content"},
             }
         chunks = _page_chunks(data["html"], part, max_chars, expected_hash)
         return {
-            "action": action, **{k: v for k, v in data.items() if k != "html"},
+            "action": action, **metadata, **{k: v for k, v in data.items() if k != "html"},
             "html": chunks["content"],
             **{k: v for k, v in chunks.items() if k != "content"},
             "truncated": chunks["next_part"] is not None,
@@ -775,7 +935,7 @@ def inspect_site(
         unchanged = []
         errors = []
         with ThreadPoolExecutor(max_workers=min(BATCH_WORKERS, max(1, len(current)))) as pool:
-            futures = [pool.submit(_batch_page, item, chars_per_page, selectors) for item in current]
+            futures = [pool.submit(_batch_page, item, chars_per_page, selectors, force_refresh) for item in current]
             for item, future in zip(current, futures):
                 try:
                     page = future.result()
@@ -843,7 +1003,7 @@ def inspect_site(
         batch = entries[offset:offset + min(limit, 20)]
         matches, errors = [], []
         with ThreadPoolExecutor(max_workers=3) as pool:
-            futures = [pool.submit(_search_many_one, item, queries, match_mode) for item in batch]
+            futures = [pool.submit(contextvars.copy_context().run, _search_many_one, item, queries, match_mode) for item in batch]
             for item, future in zip(batch, futures):
                 try:
                     result = future.result()
@@ -881,7 +1041,7 @@ def inspect_site(
     matches = []
     errors = []
     with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(_search_one, item, query) for item in batch]
+        futures = [pool.submit(contextvars.copy_context().run, _search_one, item, query) for item in batch]
         for item, future in zip(batch, futures):
             try:
                 match = future.result()

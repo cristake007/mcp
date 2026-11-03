@@ -1,6 +1,6 @@
 """Published MCP output contract for inspect_site.
 
-The inspector has ten actions returning different JSON objects. A required
+The inspector has eleven actions returning different JSON objects. A required
 action discriminator and optional, strongly typed response fields keep one
 tool compatible with every action without modifying any response payload.
 Nested audit, pagination and source-map records have explicit shapes.
@@ -10,7 +10,7 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 SiteAction = Literal[
     "sitemaps", "urls", "get", "batch_get", "search", "search_many",
-    "verify_quote", "audit_changes", "audit_ack", "audit_report",
+    "verify_quote", "audit_changes", "audit_ack", "audit_report", "verify_findings",
 ]
 SiteCoverage = Literal["selected", "all"]
 
@@ -31,6 +31,7 @@ class SiteContinuation(TypedDict):
     max_chars: int
     expected_hash: str
     fields: list[str] | None
+    force_refresh: NotRequired[bool]
 
 
 class SiteBatchPage(TypedDict):
@@ -49,6 +50,9 @@ class SiteBatchPage(TypedDict):
     content_complete: bool
     part_complete: bool
     retrieve_remaining: SiteContinuation | None
+    fetched_at: NotRequired[str]
+    provenance: NotRequired[Literal["origin", "cache", "unknown"]]
+    http_evidence: NotRequired[list[dict[str, Any]]]
     change_status: NotRequired[Literal["new", "changed"]]
 
 
@@ -129,7 +133,7 @@ class SiteAuditEntry(TypedDict):
 
 class SiteInputError(TypedDict):
     code: Literal["invalid_parameter"]
-    parameter: Literal["offset", "limit", "max_chars", "part", "expected_hash", "view"]
+    parameter: Literal["offset", "limit", "max_chars", "part", "expected_hash", "view", "force_refresh"]
     message: str
     expected: str
     received: str
@@ -208,4 +212,8 @@ class SiteInspectionResult(TypedDict):
     status_scope: NotRequired[Literal["persisted_baseline_only"]]
     current_site_freshness_checked: NotRequired[bool]
     extraction_completed_in_this_report: NotRequired[bool]
+    fetched_at: NotRequired[str]
+    provenance: NotRequired[Literal["origin", "cache", "unknown"]]
+    http_evidence: NotRequired[list[dict[str, Any]]]
+    results: NotRequired[list[dict[str, Any]]]
     note: NotRequired[str]

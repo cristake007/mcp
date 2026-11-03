@@ -32,6 +32,7 @@ CHATGPT_CLIENT_ORIGINS = (
     "https://chatgpt.com",
     "https://desktop.chat.openai.com",
     "https://chat.openai.com",
+    "null",
 )
 
 

@@ -32,7 +32,7 @@ class SiteInspectorTests(unittest.TestCase):
         schema = tool.output_schema
         self.assertEqual(schema["type"], "object")
         self.assertIn("action", schema["required"])
-        self.assertEqual(len(schema["properties"]["action"]["enum"]), 10)
+        self.assertEqual(len(schema["properties"]["action"]["enum"]), 11)
         for field in ("pages", "coverage_report", "source_map", "pending_parts",
                       "query_totals", "entries", "matches", "next_offset", "acf"):
             self.assertIn(field, schema["properties"])
@@ -74,6 +74,8 @@ class SiteInspectorTests(unittest.TestCase):
             ("search_many", {"queries": ["Test"], "sitemap": "cursuri-sitemap.xml"}),
             ("verify_quote", {"url": page_url, "field": "acf.tematica",
                               "quote": "Test"}),
+            ("verify_findings", {"findings": [{"url": page_url, "field": "acf.tematica",
+                 "original": "Test", "replacement": "Test"}]}),
             ("audit_report", {"sitemap": "cursuri-sitemap.xml"}),
             ("audit_ack", {"url": page_url, "expected_hash": checksum}),
         ]
@@ -83,7 +85,9 @@ class SiteInspectorTests(unittest.TestCase):
               patch.object(site, "_read_page", return_value=page),
               patch("app.site_audit.get_reviews", return_value={}),
               patch("app.site_audit.review_coverage", return_value=report),
-              patch("app.site_audit.save_reviews")):
+              patch("app.site_audit.save_reviews"),
+              patch.object(site, "datetime") as clock):
+            clock.now.return_value.isoformat.return_value = "2026-11-03T12:00:00+00:00"
             for action, params in cases:
                 with self.subTest(action=action, view=params.get("view")):
                     output = site.inspect_site(action=action, **params)
