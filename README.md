@@ -27,6 +27,20 @@ MCP tool `corpus_stats` or `./mcpctl rag stats "term"`.
 Two-term statistics distinguish occurrence in the same article from
 occurrence elsewhere in the same document. Results are literal, not semantic.
 
+## Dedicated course catalog search (independent of RAG)
+
+Use **`search_courses`** when asking ChatGPT or Claude to find, count or compare courses by title, ISO standard, keyword or ACF text. Unlike the general `inspect_site` search, it searches **only** `cursuri-sitemap.xml` and processes the entire course catalog in **one MCP invocation**.
+
+```json
+{"queries": ["29001"], "match_mode": "contains", "force_refresh": true}
+```
+
+Search the common identifier (e.g. `29001`) to find inconsistent spellings such as `ISO 29001:2020`, `ISO/TS 29001:2020` and `ISO / TS 29001:2020`. `queries` supports 1–10 literal phrases (OR semantics). Modes: `contains` (case-insensitive), `whole_word` or `accent_insensitive`. Results list the matching course URLs, titles, original field paths, snippets and per-field occurrence counts; no content is rewritten.
+
+The server first reads the public sitemap, then uses the WordPress REST **course collection** (100 entries per page) instead of 195 individual HTTP requests. Missing/incomplete REST entries are individually recovered, up to a bounded fallback limit. The output includes `total_courses`, `scanned_courses`, `matching_courses`, `errors`, `missing_courses_count` and `complete`. **Never claim a complete result unless `complete=true`**. A blocked REST endpoint or missing ACF fields is reported as incomplete, not silently treated as zero matches. The sitemap is the scope: unpublished/unlisted courses and JavaScript-only text are not searched. `force_refresh=true` bypasses the MCP sitemap cache and asks intermediaries for revalidation, without guaranteeing origin freshness.
+
+The tool is read-only and uses the existing fixed-host HTTP restrictions. It is independently configurable through `MCP_DISABLED_TOOLS=search_courses`. After deployment, restart the MCP service and refresh the tool list in the ChatGPT/Claude connector.
+
 ## Live site inspection (independent of RAG)
 
 The single **`inspect_site`** MCP tool queries public content on
