@@ -663,7 +663,11 @@ def inspect_site(
     force_refresh: bool = False,
     findings: list[dict] | None = None,
 ) -> SiteInspectionResult:
-    """Inspect live tuvkarpat.ro through one MCP tool.
+    """Inspect live tuvkarpat.ro through one advanced MCP tool.
+
+    For user requests to find/count/compare courses containing text or ISO
+    standards, prefer the dedicated search_courses tool. It scans only the
+    complete course catalog in one call; do not use sitemap=all for courses.
 
     force_refresh: bypass MCP caches and request HTTP revalidation with a unique
       request URL. Intermediaries may ignore it; provenance remains unknown unless
