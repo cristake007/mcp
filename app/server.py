@@ -124,6 +124,9 @@ if tool_enabled("whoami"):
 if tool_enabled("inspect_site"):
     from app.site_inspector import inspect_site
     mcp.tool()(inspect_site)
+if tool_enabled("search_courses"):
+    from app.course_search import search_courses
+    mcp.tool()(search_courses)
 
 
 def login_cookie(ticket: str) -> str:
