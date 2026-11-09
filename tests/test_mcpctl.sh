@@ -29,6 +29,7 @@ ctl() { bash "$TMP/mcpctl" "$@"; }
 
 ctl tools list | grep 'ping.*enabled' >/dev/null
 ctl tools list | grep 'inspect_site.*enabled' >/dev/null
+ctl tools list | grep 'search_courses.*enabled' >/dev/null
 ctl tools list | grep 'corpus_stats.*unavailable' >/dev/null
 ctl tools list | grep 'list_docs.*unavailable' >/dev/null
 ctl tools list | grep 'document_status.*unavailable' >/dev/null
