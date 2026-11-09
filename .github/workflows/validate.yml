@@ -77,6 +77,8 @@ jobs:
         run: python -m tests.rag_viewer_optional
       - name: Test inspect_site (offline, no live site requests)
         run: python -m tests.site_inspector
+      - name: Test search_courses (offline, no live site requests)
+        run: python -m tests.course_search
       - name: Test selective tool registration
         run: |
           MCP_DISABLED_TOOLS=whoami python -m tests.rag_optional
