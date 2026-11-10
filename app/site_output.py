@@ -148,6 +148,7 @@ class SiteInspectionResult(TypedDict):
     # All other fields are action-specific. None are injected or rewritten.
     sitemaps: NotRequired[list[str]]
     sitemap: NotRequired[str]
+    domain: NotRequired[dict[str, Any]]
     url: NotRequired[str]
     urls: NotRequired[list[str]]
     total: NotRequired[int]

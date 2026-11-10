@@ -662,12 +662,16 @@ def inspect_site(
     match_mode: str = "exact",
     force_refresh: bool = False,
     findings: list[dict] | None = None,
+    domain: str | int | None = None,
 ) -> SiteInspectionResult:
     """Inspect live tuvkarpat.ro through one advanced MCP tool.
 
     For user requests to find/count/compare courses containing text or ISO
-    standards, prefer the dedicated search_courses tool. It scans only the
-    complete course catalog in one call; do not use sitemap=all for courses.
+    standards, prefer search_courses. For domain-targeted extraction, use
+    action=batch_get, domain="ergonomie" (or the WordPress domain ID). The
+    entire domain, up to 100 courses per call, is processed automatically;
+    beyond 100 use next_offset. Taxonomy membership is from WordPress REST API,
+    not text matches or archive URLs. Without domain, batches remain 10 pages.
 
     force_refresh: bypass MCP caches and request HTTP revalidation with a unique
       request URL. Intermediaries may ignore it; provenance remains unknown unless
@@ -722,6 +726,9 @@ def inspect_site(
             "inspect_site: acțiune invalidă; folosește una dintre: "
             + ", ".join(valid_actions)
         )
+
+    if domain is not None and action not in ("urls", "batch_get", "audit_changes"):
+        raise ValueError("domain se folosește cu urls, batch_get sau audit_changes")
 
     # Return a typed, recoverable error instead of a FastMCP traceback for
     # malformed common parameters. A failed call never fetches or audits data.
@@ -871,15 +878,26 @@ def inspect_site(
         }
 
     if action == "urls":
-        selected = _sitemap_url(sitemap, _sitemaps())
-        urls = _urls(selected)
+        selected_domain = None
+        if domain is not None:
+            from app.course_catalog import COURSE_SITEMAP, domain_urls
+            if sitemap and sitemap not in (COURSE_SITEMAP, "cursuri-sitemap.xml"):
+                raise ValueError("domain poate fi folosit doar cu sitemapul cursurilor")
+            selected_domain, urls = domain_urls(domain)
+            selected = COURSE_SITEMAP
+        else:
+            selected = _sitemap_url(sitemap, _sitemaps())
+            urls = _urls(selected)
         subset = urls[offset:offset + limit]
         next_offset = offset + len(subset)
-        return {
+        response = {
             "action": action, "sitemap": selected, "total": len(urls),
             "offset": offset, "urls": subset,
             "next_offset": next_offset if next_offset < len(urls) else None,
         }
+        if selected_domain is not None:
+            response["domain"] = selected_domain
+        return response
 
     if action == "get":
         if not url:
@@ -922,14 +940,28 @@ def inspect_site(
         }
 
     if action in ("batch_get", "audit_changes"):
-        if not sitemap or sitemap == "all":
-            raise ValueError(action + " necesită un singur sitemap explicit")
-        selected = _sitemap_url(sitemap, _sitemaps())
-        urls = _urls(selected)
-        eligible_urls, skipped_index_urls = _index_pages_in_sitemap(selected, urls)
-        batch_limit = min(limit, BATCH_MAX_PAGES)
+        selected_domain = None
+        if domain is not None:
+            from app.course_catalog import COURSE_SITEMAP, domain_urls
+            if sitemap and sitemap not in (COURSE_SITEMAP, "cursuri-sitemap.xml"):
+                raise ValueError("domain poate fi folosit doar cu sitemapul cursurilor")
+            selected_domain, eligible_urls = domain_urls(domain)
+            selected = COURSE_SITEMAP
+            urls = eligible_urls
+            skipped_index_urls = []
+            # Domain batches are handled by the server, not manually by the LLM.
+            # A bounded 100-course response avoids unbounded output payloads.
+            batch_limit = min(max(0, len(eligible_urls) - offset), 100)
+            chars_per_page = max_chars
+        else:
+            if not sitemap or sitemap == "all":
+                raise ValueError(action + " necesită un singur sitemap explicit")
+            selected = _sitemap_url(sitemap, _sitemaps())
+            urls = _urls(selected)
+            eligible_urls, skipped_index_urls = _index_pages_in_sitemap(selected, urls)
+            batch_limit = min(limit, BATCH_MAX_PAGES)
+            chars_per_page = min(max_chars, BATCH_CHARS_PER_PAGE)
         current = eligible_urls[offset:offset + batch_limit]
-        chars_per_page = min(max_chars, BATCH_CHARS_PER_PAGE)
         if action == "audit_changes":
             from app.site_audit import get_reviews
             baselines = get_reviews(current, selectors)
@@ -965,11 +997,12 @@ def inspect_site(
         coverage_report = batch_coverage(pages, unchanged, errors, len(current))
         return {
             "action": action, "sitemap": selected, "total_urls": len(urls),
+            **({"domain": selected_domain} if selected_domain is not None else {}),
             "auditable_urls": len(eligible_urls),
             "skipped_index_urls": skipped_index_urls,
             "fields": list(selectors) if selectors is not None else None,
             "coverage": "selected" if selectors is not None else "all",
-            "offset": offset, "requested_limit": limit,
+            "offset": offset, "requested_limit": batch_limit if domain is not None else limit,
             "processed": len(current), "pages": pages, "unchanged": unchanged,
             "errors": errors,
             "coverage_report": coverage_report,
@@ -983,6 +1016,8 @@ def inspect_site(
                 "end_of_sitemap describes URL pagination only. "
                 "Do not claim an exhaustive audit until all batches, errors "
                 "and pending parts have been reviewed. HTML is not JS-rendered. "
+                "A selected domain is the complete WordPress taxonomy selection, "
+                "subject to 100-course response pagination. "
                 "Only audit_ack explicitly marks pages reviewed; unchanged "
                 "means unchanged since that exact field selection was approved."
             ),

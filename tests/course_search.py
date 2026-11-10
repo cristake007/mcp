@@ -135,5 +135,75 @@ class CourseSearchTests(unittest.TestCase):
         TypeAdapter(courses.CourseSearchResult).validate_python(result.structured_content)
 
 
+    def test_wordpress_domain_navigation_and_scoped_search(self):
+        index, listing = self._sitemap()
+        items = self._catalog()
+        for n, entry in enumerate(items):
+            entry.update({"id": 100 + n, "slug": entry["link"].rstrip("/").split("/")[-1],
+                          "domenii": [123] if n < 2 else [456]})
+        terms = [{"id": 123, "slug": "ergonomie", "name": "Ergonomie", "count": 2},
+                 {"id": 456, "slug": "altul", "name": "Altul", "count": 1}]
+
+        def fetch(url, accept=""):
+            if "/domenii?" in url:
+                return json.dumps(terms)
+            if "domenii=123" in url:
+                return json.dumps(items[:2])
+            if "slug=auditor-29001" in url:
+                return json.dumps(items[:1])
+            if "/cursuri?" in url:
+                return json.dumps(items)
+            raise AssertionError("Unexpected REST request: " + url)
+
+        with index, listing, patch.object(site, "_fetch", side_effect=fetch):
+            domains = courses.search_courses(action="list_domains")
+            self.assertTrue(domains["complete"])
+            self.assertEqual(domains["total_domains"], 2)
+            self.assertEqual(domains["domains"][0]["count"], 2)
+
+            listing_result = courses.search_courses(
+                action="list_courses", domain="ergonomie")
+            self.assertTrue(listing_result["complete"])
+            self.assertEqual(listing_result["total_courses"], 2)
+            self.assertEqual([c["id"] for c in listing_result["courses"]], [100, 101])
+            self.assertEqual(listing_result["domain"]["id"], 123)
+
+            scoped = courses.search_courses(
+                ["29001"], domain="ergonomie", force_refresh=True)
+            self.assertTrue(scoped["complete"])
+            self.assertEqual(scoped["matching_courses"], 2)
+            self.assertEqual(scoped["scanned_courses"], 2)
+            unrestricted = courses.search_courses(["29001"])
+            self.assertEqual(unrestricted["matching_courses"], 3)
+
+            detail = courses.search_courses(
+                action="get_course", course="auditor-29001")
+            self.assertEqual(detail["course"]["id"], 100)
+            self.assertEqual(detail["course"]["domenii"], [123])
+            self.assertIn("tematica", detail["course"]["acf"])
+
+    def test_domain_count_mismatch_is_not_silently_accepted(self):
+        from app import course_catalog as catalog
+        index, listing = self._sitemap()
+        items = self._catalog()[:2]
+        for n, entry in enumerate(items):
+            entry.update({"id": 100 + n,
+                          "slug": entry["link"].rstrip("/").split("/")[-1],
+                          "domenii": [123]})
+        terms = [{"id": 123, "slug": "ergonomie",
+                  "name": "Ergonomie", "count": 3}]
+
+        def fetch(url, accept=""):
+            if "/domenii?" in url:
+                return json.dumps(terms)
+            if "domenii=123" in url:
+                return json.dumps(items)
+            raise AssertionError(url)
+
+        with index, listing, patch.object(site, "_fetch", side_effect=fetch):
+            with self.assertRaisesRegex(RuntimeError, "declară 3"):
+                catalog.domain_items("ergonomie")
+
+
 if __name__ == "__main__":
     unittest.main()
