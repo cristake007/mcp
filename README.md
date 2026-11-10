@@ -39,6 +39,50 @@ Search the common identifier (e.g. `29001`) to find inconsistent spellings such 
 
 The server first reads the public sitemap, then uses the WordPress REST **course collection** (100 entries per page) instead of 195 individual HTTP requests. Missing/incomplete REST entries are individually recovered, up to a bounded fallback limit. The output includes `total_courses`, `scanned_courses`, `matching_courses`, `errors`, `missing_courses_count` and `complete`. **Never claim a complete result unless `complete=true`**. A blocked REST endpoint or missing ACF fields is reported as incomplete, not silently treated as zero matches. The sitemap is the scope: unpublished/unlisted courses and JavaScript-only text are not searched. `force_refresh=true` bypasses the MCP sitemap cache and asks intermediaries for revalidation, without guaranteeing origin freshness.
 
+### WordPress taxonomy navigation (same tool, no additional MCP tool)
+
+`search_courses` now has an optional `action` argument (default: `search`).
+Its other actions use the native `domenii` taxonomy on the `cursuri` post type,
+not keyword similarity or archive permalinks:
+
+```json
+{"action":"list_domains"}
+```
+
+```json
+{"action":"list_courses","domain":"ergonomie"}
+```
+
+```json
+{"action":"get_course","course":"introducere-in-ergonomie"}
+```
+
+```json
+{"action":"search","queries":["ISO"],"domain":"ergonomie"}
+```
+
+`domain` accepts the taxonomy slug, exact name or numeric term ID (e.g. 123).
+`list_courses` returns IDs, titles, canonical course URLs and domain IDs
+without large ACF payloads; `get_course` returns full ACF.
+The server validates domain membership against WordPress term IDs and checks the
+result against the taxonomy `count` and the public course sitemap. On mismatch,
+it fails rather than claiming a complete selection. Term archive URLs are not
+used because they can return HTTP 404 even for valid taxonomy terms.
+
+For auditing an entire domain, use the **existing** `inspect_site` tool:
+
+```json
+{"action":"batch_get","domain":"ergonomie","force_refresh":true}
+```
+
+When `domain` is supplied, `batch_get` / `audit_changes` retrieve up to
+100 domain courses in one invocation (regardless of the ordinary 10-page batch
+limit). If more than 100 are selected, follow `next_offset`. Always check
+`batch_complete`, `pending_parts`, `errors` and warnings. A large individual
+course may require continuation. Without `domain`, the original batch limit and
+sitemap behavior remain unchanged. `inspect_site(action="urls", domain=...)`
+also lists the exact membership URLs.
+
 The tool is read-only and uses the existing fixed-host HTTP restrictions. It is independently configurable through `MCP_DISABLED_TOOLS=search_courses`. After deployment, restart the MCP service and refresh the tool list in the ChatGPT/Claude connector.
 
 ## Live site inspection (independent of RAG)

@@ -823,5 +823,35 @@ class SiteInspectorTests(unittest.TestCase):
 
 
 
+    def test_domain_batch_reads_all_selected_courses_not_just_ten(self):
+        urls = [f"https://tuvkarpat.ro/cursuri/ergonomie-{i}/"
+                for i in range(13)]
+        term = {"id": 123, "slug": "ergonomie", "name": "Ergonomie", "count": 13}
+
+        def read(url):
+            return {"url": url, "format": "acf_json", "id": 100,
+                    "title": "Ergonomie",
+                    "acf": {"tematica": "Conținut integral pentru audit"}}
+
+        with (
+            patch("app.course_catalog.domain_urls", return_value=(term, urls)),
+            patch.object(site, "_read_page", side_effect=read) as reader,
+        ):
+            batch = site.inspect_site("batch_get", domain="ergonomie")
+            self.assertEqual(batch["processed"], 13)
+            self.assertEqual(batch["auditable_urls"], 13)
+            self.assertEqual(batch["domain"]["id"], 123)
+            self.assertTrue(batch["batch_complete"])
+            self.assertIsNone(batch["next_offset"])
+            self.assertEqual(reader.call_count, 13)
+            filtered = site.inspect_site("urls", domain=123, limit=100)
+            self.assertEqual(filtered["total"], 13)
+            self.assertEqual(filtered["urls"], urls)
+
+    def test_domain_filter_is_not_allowed_for_unrelated_site_actions(self):
+        with self.assertRaisesRegex(ValueError, "domain"):
+            site.inspect_site("search_many", domain="ergonomie", queries=["ISO"])
+
+
 if __name__ == "__main__":
     unittest.main()

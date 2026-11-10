@@ -6,7 +6,7 @@ The result is exhaustive only if every sitemap course was read successfully.
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from app import site_inspector as site
 from app.site_fields import extract_with_sources
@@ -66,6 +66,12 @@ class CourseSearchResult(TypedDict):
     missing_courses_count: int
     missing_urls: list[str]
     note: str
+    action: NotRequired[str]
+    domain: NotRequired[dict]
+    domains: NotRequired[list[dict]]
+    total_domains: NotRequired[int]
+    courses: NotRequired[list[dict]]
+    course: NotRequired[dict]
 
 
 def _validate_queries(queries: list[str], match_mode: str) -> list[str]:
@@ -153,7 +159,7 @@ def _collection(sitemap_urls: list[str]) -> dict[str, dict]:
     catalog = {}
     max_pages = (len(allowed) + PAGE_SIZE - 1) // PAGE_SIZE + 5
     for page in range(1, max_pages + 1):
-        url = f"{COURSE_API}?per_page={PAGE_SIZE}&page={page}&_fields=id,link,title,acf"
+        url = f"{COURSE_API}?per_page={PAGE_SIZE}&page={page}&_fields=id,link,title,acf,domenii,slug"
         items = json.loads(site._fetch(url, "application/json"))
         if not isinstance(items, list) or len(items) > PAGE_SIZE:
             raise RuntimeError("REST API cursuri a returnat o colecție invalidă")
@@ -176,8 +182,7 @@ def _recover(url: str, refresh: bool) -> dict:
             "acf": data.get("acf")}
 
 
-@site._refresh_scope
-def search_courses(
+def _search_original(
     queries: list[str],
     match_mode: Literal["contains", "whole_word", "accent_insensitive"] = "contains",
     force_refresh: bool = False,
@@ -272,3 +277,137 @@ def search_courses(
             "Conținutul JavaScript neprezent în REST API nu este verificat."
         ),
     }
+
+# Domain membership is resolved through the WordPress taxonomy, not text
+# matching in a title, sitemap URL, or a broken taxonomy archive permalink.
+from app import course_catalog as catalog
+
+
+def _catalog_result(action: str, match_mode: str = "contains") -> CourseSearchResult:
+    return {
+        "action": action, "queries": [], "match_mode": match_mode,
+        "sitemap": COURSE_SITEMAP, "total_courses": 0,
+        "scanned_courses": 0, "matching_courses": 0,
+        "complete": True, "matches": [], "query_totals": [],
+        "errors": [], "missing_courses_count": 0,
+        "missing_urls": [], "note": "",
+    }
+
+
+def _list_catalog_courses(domain: str | int | None) -> CourseSearchResult:
+    result = _catalog_result("list_courses")
+    if domain is None:
+        urls = catalog.course_urls()
+        items = _collection(urls)
+        result["total_courses"] = len(urls)
+        ordered = [items[url] for url in urls if url in items]
+    else:
+        term, ordered = catalog.domain_items(domain)
+        result["domain"] = term
+        result["total_courses"] = term["count"]
+    records = []
+    errors = []
+    for item in ordered:
+        try:
+            records.append(catalog.course_summary(item))
+        except (ValueError, TypeError) as exc:
+            errors.append({"url": str(item.get("link", "")) if isinstance(item, dict) else "",
+                           "error": str(exc)[:200]})
+    result["courses"] = records
+    result["scanned_courses"] = len(records)
+    result["missing_courses_count"] = max(0, result["total_courses"] - len(records))
+    result["errors"] = errors
+    result["complete"] = not errors and len(records) == result["total_courses"]
+    result["note"] = ("Lista folosește asocierile din taxonomia WordPress 'domenii'. "
+                      "Pentru ACF integral folosește action='get_course'.")
+    return result
+
+
+def _search_catalog_domain(
+    queries: list[str], match_mode: str, domain: str | int
+) -> CourseSearchResult:
+    terms = _validate_queries(queries, match_mode)
+    selected, items = catalog.domain_items(domain)
+    result = _catalog_result("search", match_mode)
+    totals = {query: {"query": query, "matching_courses": 0, "occurrences": 0}
+              for query in terms}
+    matches = []
+    errors = []
+    scanned = 0
+    for item in items:
+        url = item["link"]
+        try:
+            found = _match_course(url, item, terms, match_mode)
+            scanned += 1
+        except (ValueError, KeyError, TypeError) as exc:
+            errors.append({"url": url, "error": str(exc)[:200]})
+            continue
+        if found:
+            matches.append(found)
+            for term in found["terms"]:
+                totals[term["query"]]["matching_courses"] += 1
+                totals[term["query"]]["occurrences"] += term["occurrences"]
+    result.update({
+        "queries": terms, "domain": selected, "total_courses": selected["count"],
+        "scanned_courses": scanned, "matching_courses": len(matches),
+        "matches": matches, "query_totals": list(totals.values()),
+        "errors": errors,
+        "missing_courses_count": max(0, selected["count"] - scanned),
+        "complete": not errors and scanned == selected["count"],
+        "note": ("Căutare textuală limitată la membrii reali ai domeniului. "
+                 "complete=false înseamnă rezultat incomplet."),
+    })
+    return result
+
+
+@site._refresh_scope
+def search_courses(
+    queries: list[str] | None = None,
+    match_mode: Literal["contains", "whole_word", "accent_insensitive"] = "contains",
+    force_refresh: bool = False,
+    action: Literal["search", "list_domains", "list_courses", "get_course"] = "search",
+    domain: str | int | None = None,
+    course: str | int | None = None,
+) -> CourseSearchResult:
+    """Navigate and search the public WordPress course catalog.
+
+    Default action='search' preserves existing calls with queries=['29001'].
+    action='list_domains' returns taxonomy IDs, names, slugs and WP counts.
+    action='list_courses', optionally domain='ergonomie' or domain=123, returns
+    all course IDs, titles, URLs and domain IDs, with pagination done server-side.
+    action='get_course', course=WordPress ID or slug, returns full ACF.
+    action='search' can restrict text search to a domain without false matches
+    from unrelated courses mentioning its name. No external TÜV websites.
+    complete=false indicates partial data, never claim exhaustive coverage.
+    force_refresh attempts revalidation but cannot guarantee CDN origin.
+    """
+    if type(force_refresh) is not bool:
+        raise ValueError("force_refresh trebuie să fie boolean")
+    if action == "list_domains":
+        if queries is not None or domain is not None or course is not None:
+            raise ValueError("list_domains nu acceptă queries, domain sau course")
+        result = _catalog_result(action)
+        result["domains"] = catalog.domains()
+        result["total_domains"] = len(result["domains"])
+        result["note"] = "Taxonomia WordPress domenii, nu arhivele din sitemap."
+        return result
+    if action == "list_courses":
+        if queries is not None or course is not None:
+            raise ValueError("list_courses nu acceptă queries sau course")
+        return _list_catalog_courses(domain)
+    if action == "get_course":
+        if course is None or domain is not None or queries is not None:
+            raise ValueError("get_course necesită course=ID sau slug, fără alte filtre")
+        item = catalog.get_course(course)
+        result = _catalog_result(action)
+        result["total_courses"] = result["scanned_courses"] = 1
+        result["course"] = item
+        result["note"] = "Cursul și ACF provin din WordPress REST API."
+        return result
+    if action != "search":
+        raise ValueError("Acțiune necunoscută: " + str(action))
+    if course is not None:
+        raise ValueError("Pentru ID/slug folosește action='get_course'")
+    if domain is None:
+        return _search_original(queries, match_mode, force_refresh)
+    return _search_catalog_domain(queries, match_mode, domain)
