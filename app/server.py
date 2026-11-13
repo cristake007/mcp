@@ -136,6 +136,13 @@ for catalog_tool in (list_domains, list_courses, get_course, find_courses):
     if tool_enabled(catalog_tool.__name__):
         mcp.tool()(catalog_tool)
 
+# Read-only site tools expose one discoverable operation each.
+from app.site_tools import list_sitemaps, list_site_urls, get_site_text, search_site
+
+for site_tool in (list_sitemaps, list_site_urls, get_site_text, search_site):
+    if tool_enabled(site_tool.__name__):
+        mcp.tool()(site_tool)
+
 
 def login_cookie(ticket: str) -> str:
     return hmac.new(
