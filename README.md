@@ -107,6 +107,30 @@ also lists the exact membership URLs.
 
 The tool is read-only and uses the existing fixed-host HTTP restrictions. It is independently configurable through `MCP_DISABLED_TOOLS=search_courses`. After deployment, restart the MCP service and refresh the tool list in the ChatGPT/Claude connector.
 
+### Focused read-only website tools
+
+New integrations can inspect site pages without passing `action` to the
+legacy `inspect_site` multiplexer:
+
+| MCP tool | Purpose |
+|---|---|
+| `list_sitemaps` | Discover published XML sitemaps |
+| `list_site_urls` | Page through a sitemap or a real WordPress course domain |
+| `get_site_text` | Read HTML/ACF text, field source offsets and hash-safe continuation |
+| `search_site` | Search one phrase at a time across site pages (up to 20 URLs per call) |
+
+These functions reuse the existing fixed-host HTTP reader, sitemap parsing,
+field extraction, and Unicode matcher. They do not create another cache or
+duplicate the business logic. Their outputs contain explicit completeness and
+pagination metadata. Use `find_courses` for a complete course-catalog query;
+`search_site` is intentionally paginated for arbitrary site content.
+
+The existing `inspect_site` is retained for compatibility and for audit
+operations (`verify_findings`, `audit_changes`, `audit_ack`,
+`audit_report`). A read-only site tool does not acknowledge audit results.
+All tools currently require the server's existing OAuth authentication; this
+change does not introduce a separate public authorization boundary.
+
 ## Live site inspection (independent of RAG)
 
 The single **`inspect_site`** MCP tool queries public content on
