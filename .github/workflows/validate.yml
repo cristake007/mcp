@@ -81,6 +81,8 @@ jobs:
         run: python -m tests.course_search
       - name: Test audited URL identity and explicit acknowledgement
         run: python -m tests.audit_operations
+      - name: Test extracted site search service
+        run: python -m tests.search_service
       - name: Test focused MCP catalog contracts and shared primitives
         run: |
           python -m tests.catalog_tools
