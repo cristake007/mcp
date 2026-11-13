@@ -22,6 +22,11 @@ from urllib.parse import quote, urlsplit
 from bs4 import BeautifulSoup
 
 from app.site_output import SiteInspectionResult
+from app.site_sitemaps import (
+    xml_locations as _xml_locations,
+    index_pages_in_sitemap as _index_pages_in_sitemap,
+)
+from app.site_text import as_search_text as _as_search_text, page_chunks as _page_chunks
 from app.html_text import visible_text as _visible_text
 from app.site_fields import normalize_fields, extract_with_sources, slice_sources
 from app.text_matching import TextMatcher, accent_fold_with_positions
@@ -183,24 +188,6 @@ def _fetch(url: str, accept: str = "text/html,*/*") -> str:
     return body.decode("utf-8-sig", errors="replace")
 
 
-def _xml_locations(xml: str, kind: str) -> list[str]:
-    try:
-        root = ET.fromstring(xml)
-    except ET.ParseError as exc:
-        raise RuntimeError("Sitemap-ul nu conține XML valid") from exc
-    root_name = root.tag.split("}")[-1]
-    expected = "sitemapindex" if kind == "sitemap" else "urlset"
-    if root_name != expected:
-        raise RuntimeError("Tip de sitemap neașteptat: " + root_name)
-    return [
-        loc.text.strip()
-        for item in root
-        if item.tag.split("}")[-1] == ("sitemap" if kind == "sitemap" else "url")
-        for loc in item
-        if loc.tag.split("}")[-1] == "loc" and loc.text and loc.text.strip()
-    ]
-
-
 def _sitemaps() -> list[str]:
     links = _xml_locations(
         _sitemap_xml(SITEMAP_INDEX), "sitemap"
@@ -231,26 +218,6 @@ def _urls(sitemap_url: str) -> list[str]:
             continue
     return list(dict.fromkeys(urls))
 
-
-def _index_pages_in_sitemap(sitemap_url: str, urls: list[str]) -> tuple[list[str], list[str]]:
-    """Exclude an archive landing page from individual-entry audit batches.
-
-    For cursuri-sitemap.xml, /cursuri/ is the archive, not an ACF course.
-    This does not affect the normal urls or get actions.
-    """
-    filename = urlsplit(sitemap_url).path.rsplit("/", 1)[-1]
-    match = re.fullmatch(r"([a-z0-9_-]+)-sitemap(?:\d+)?\.xml", filename)
-    if match is None:
-        return list(urls), []
-    archive_path = "/" + match.group(1)
-    entries, skipped = [], []
-    for item in urls:
-        parsed = urlsplit(item)
-        if not parsed.query and parsed.path.rstrip("/") == archive_path:
-            skipped.append(item)
-        else:
-            entries.append(item)
-    return entries, skipped
 
 def _clean_html(raw: str) -> str:
     soup = BeautifulSoup(raw, "html.parser")
@@ -301,28 +268,6 @@ def _read_page(url: str) -> dict:
     return {"url": url, "format": "page_html", "html": _clean_html(_fetch(url))}
 
 
-def _as_search_text(data: dict) -> str:
-    if data["format"] == "acf_json":
-        pieces = [data.get("title", "")]
-        def collect(value):
-            if isinstance(value, dict):
-                for nested in value.values():
-                    collect(nested)
-            elif isinstance(value, list):
-                for nested in value:
-                    collect(nested)
-            elif isinstance(value, str):
-                pieces.append(BeautifulSoup(value, "html.parser").get_text(" ", strip=True))
-        collect(data.get("acf"))
-        return re.sub(r"\s+", " ", " ".join(pieces)).strip()
-    soup = BeautifulSoup(data["html"], "html.parser")
-    # Menus within Elementor templates are navigation, not page content.
-    for nav in soup.select("nav, .elementor-nav-menu"):
-        nav.decompose()
-    return re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
-
-
-
 BATCH_MAX_PAGES = 10
 BATCH_WORKERS = 4
 BATCH_CHARS_PER_PAGE = 12000
@@ -363,27 +308,6 @@ def _audit_text(data: dict) -> tuple[str, list[str]]:
         if not data["acf"]:
             warnings.append("ACF este gol în REST API.")
     return "\n\n".join(lines), warnings
-
-
-def _page_chunks(content: str, part: int, size: int, expected_hash: str = "") -> dict:
-    """Deterministic, reconstructible slices. No characters disappear."""
-    checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    if expected_hash and expected_hash != checksum:
-        raise ValueError("Conținutul paginii s-a schimbat; reia de la part=0.")
-    total_parts = max(1, (len(content) + size - 1) // size)
-    if not 0 <= part < total_parts:
-        raise ValueError("part este în afara intervalului 0..%d" % (total_parts - 1))
-    piece = content[part * size:(part + 1) * size]
-    return {
-        "content": piece,
-        "total_chars": len(content),
-        "sha256": checksum,
-        "part": part,
-        "total_parts": total_parts,
-        "next_part": part + 1 if part + 1 < total_parts else None,
-        "content_complete": total_parts == 1,
-        "part_complete": True,
-    }
 
 
 def _batch_page(url: str, chars_per_page: int, fields: tuple[str, ...] | None = None, force_refresh: bool = False) -> dict:
