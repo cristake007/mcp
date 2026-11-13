@@ -33,6 +33,10 @@ ctl tools list | grep 'search_courses.*enabled' >/dev/null
 ctl tools list | grep 'list_domains.*enabled' >/dev/null
 ctl tools list | grep 'list_courses.*enabled' >/dev/null
 ctl tools list | grep 'find_courses.*enabled' >/dev/null
+ctl tools list | grep 'list_sitemaps.*enabled' >/dev/null
+ctl tools list | grep 'list_site_urls.*enabled' >/dev/null
+ctl tools list | grep 'get_site_text.*enabled' >/dev/null
+ctl tools list | grep 'search_site.*enabled' >/dev/null
 ctl tools list | grep 'corpus_stats.*unavailable' >/dev/null
 ctl tools list | grep 'list_docs.*unavailable' >/dev/null
 ctl tools list | grep 'document_status.*unavailable' >/dev/null
