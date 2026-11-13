@@ -8,7 +8,7 @@ from fastmcp import FastMCP
 from pydantic import TypeAdapter
 
 from app import course_search as courses
-from app import site_inspector as site
+from app import site_client as site
 
 SITEMAP = courses.COURSE_SITEMAP
 ARCHIVE = site.ROOT + "cursuri/"
@@ -24,9 +24,9 @@ def item(url, title, acf):
 class CourseSearchTests(unittest.TestCase):
     def _sitemap(self):
         return (
-            patch.object(site, "_sitemaps", return_value=[
+            patch.object(site, "sitemaps", return_value=[
                 site.ROOT + "page-sitemap.xml", SITEMAP]),
-            patch.object(site, "_urls", return_value=[
+            patch.object(site, "urls", return_value=[
                 ARCHIVE, AUDITOR, MANAGER, INTRO]),
         )
 
@@ -43,7 +43,7 @@ class CourseSearchTests(unittest.TestCase):
     def test_three_variant_courses_in_one_bulk_call(self):
         index, listing = self._sitemap()
         with index, listing, patch.object(
-            site, "_fetch", return_value=json.dumps(self._catalog()),
+            site, "fetch", return_value=json.dumps(self._catalog()),
         ) as fetch:
             result = courses.search_courses(["29001"], force_refresh=True)
         self.assertEqual(result["total_courses"], 3)
@@ -61,7 +61,7 @@ class CourseSearchTests(unittest.TestCase):
     def test_literal_terms_or_matched_and_unicode_offsets(self):
         index, listing = self._sitemap()
         with index, listing, patch.object(
-            site, "_fetch", return_value=json.dumps(self._catalog())
+            site, "fetch", return_value=json.dumps(self._catalog())
         ):
             narrow = courses.search_courses(["ISO/TS 29001:2020"])
             self.assertEqual(narrow["matching_courses"], 2)
@@ -81,16 +81,16 @@ class CourseSearchTests(unittest.TestCase):
         data = {"format": "acf_json", "title": self._catalog()[2]["title"]["rendered"],
                 "link": INTRO, "acf": self._catalog()[2]["acf"]}
         with index, listing, patch.object(
-            site, "_fetch", return_value=json.dumps(partial)
-        ), patch.object(site, "_load_page", return_value=(data, {})) as recovered:
+            site, "fetch", return_value=json.dumps(partial)
+        ), patch.object(site, "load_page", return_value=(data, {})) as recovered:
             result = courses.search_courses(["29001"])
             self.assertTrue(result["complete"])
             self.assertEqual(result["matching_courses"], 3)
             recovered.assert_called_once_with(INTRO, False, exact_url=True)
 
         with index, listing, patch.object(
-            site, "_fetch", side_effect=RuntimeError("Bulk REST failed")
-        ), patch.object(site, "_load_page", side_effect=RuntimeError("Course failed")):
+            site, "fetch", side_effect=RuntimeError("Bulk REST failed")
+        ), patch.object(site, "load_page", side_effect=RuntimeError("Course failed")):
             result = courses.search_courses(["29001"])
             self.assertFalse(result["complete"])
             self.assertEqual(result["scanned_courses"], 0)
@@ -103,8 +103,8 @@ class CourseSearchTests(unittest.TestCase):
         catalog = self._catalog()
         catalog[1]["acf"] = None
         with index, listing, patch.object(
-            site, "_fetch", return_value=json.dumps(catalog)
-        ), patch.object(site, "_load_page", side_effect=ValueError("ACF unavailable")):
+            site, "fetch", return_value=json.dumps(catalog)
+        ), patch.object(site, "load_page", side_effect=ValueError("ACF unavailable")):
             result = courses.search_courses(["29001"])
         self.assertFalse(result["complete"])
         self.assertEqual(result["scanned_courses"], 2)
@@ -128,7 +128,7 @@ class CourseSearchTests(unittest.TestCase):
         self.assertIn("complete", tools[0].output_schema["required"])
         index, listing = self._sitemap()
         with index, listing, patch.object(
-            site, "_fetch", return_value=json.dumps(self._catalog())
+            site, "fetch", return_value=json.dumps(self._catalog())
         ):
             result = asyncio.run(tools[0].run({"queries": ["29001"]}))
         self.assertEqual(result.structured_content["matching_courses"], 3)
@@ -155,7 +155,7 @@ class CourseSearchTests(unittest.TestCase):
                 return json.dumps(items)
             raise AssertionError("Unexpected REST request: " + url)
 
-        with index, listing, patch.object(site, "_fetch", side_effect=fetch):
+        with index, listing, patch.object(site, "fetch", side_effect=fetch):
             domains = courses.search_courses(action="list_domains")
             self.assertTrue(domains["complete"])
             self.assertEqual(domains["total_domains"], 2)
@@ -200,7 +200,7 @@ class CourseSearchTests(unittest.TestCase):
                 return json.dumps(items)
             raise AssertionError(url)
 
-        with index, listing, patch.object(site, "_fetch", side_effect=fetch):
+        with index, listing, patch.object(site, "fetch", side_effect=fetch):
             with self.assertRaisesRegex(RuntimeError, "declară 3"):
                 catalog.domain_items("ergonomie")
 
