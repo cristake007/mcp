@@ -10,6 +10,7 @@ from typing import Literal, NotRequired, TypedDict
 
 from app import site_inspector as site
 from app.site_fields import extract_with_sources
+from app.text_matching import find_positions
 
 COURSE_SITEMAP = site.ROOT + "cursuri-sitemap.xml"
 COURSE_API = site.ROOT + "wp-json/wp/v2/cursuri"
@@ -93,25 +94,8 @@ def _validate_queries(queries: list[str], match_mode: str) -> list[str]:
 
 
 def _positions(value: str, term: str, mode: str) -> list[tuple[int, int]]:
-    if mode == "accent_insensitive":
-        folded, source_positions = site._accent_fold_with_positions(value)
-        needle, _ = site._accent_fold_with_positions(term)
-        if not needle:
-            return []
-        found = []
-        start = 0
-        while True:
-            index = folded.find(needle, start)
-            if index < 0:
-                break
-            found.append((source_positions[index],
-                          source_positions[index + len(needle) - 1] + 1))
-            start = index + len(needle)
-        return found
-    pattern = re.escape(term)
-    if mode == "whole_word":
-        pattern = r"(?<!\w)" + pattern + r"(?!\w)"
-    return [match.span() for match in re.finditer(pattern, value, re.IGNORECASE)]
+    """Find exact source offsets, using the shared site/course matcher."""
+    return find_positions(value, term, mode)
 
 
 def _match_course(url: str, item: dict, queries: list[str], match_mode: str) -> CourseMatch | None:
