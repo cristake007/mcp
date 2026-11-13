@@ -7,7 +7,7 @@ from unittest.mock import patch
 from fastmcp import FastMCP
 from pydantic import TypeAdapter
 
-from app import site_inspector as site
+from app import site_client as site
 from app import site_tools
 
 
@@ -20,8 +20,8 @@ PAGE = {"url": URL, "format": "acf_json", "id": 24759,
 
 class SiteToolsTests(unittest.TestCase):
     def test_list_sitemaps_and_paginated_urls(self):
-        with patch.object(site, "_sitemaps", return_value=[SITEMAP]), patch.object(
-            site, "_urls", return_value=[URL, URL + "second/"],
+        with patch.object(site, "sitemaps", return_value=[SITEMAP]), patch.object(
+            site, "urls", return_value=[URL, URL + "second/"],
         ):
             self.assertEqual(site_tools.list_sitemaps()["sitemaps"], [SITEMAP])
             first = site_tools.list_site_urls(sitemap="cursuri-sitemap.xml", limit=1)
@@ -38,7 +38,7 @@ class SiteToolsTests(unittest.TestCase):
             site_tools.list_site_urls(sitemap="cursuri-sitemap.xml", limit=101)
 
     def test_full_acf_text_and_hash_continuation(self):
-        with patch.object(site, "_read_page", return_value=PAGE):
+        with patch.object(site, "read_page", return_value=PAGE):
             first = site_tools.get_site_text(URL, fields=["acf.tematica"], max_chars=1000)
             self.assertEqual(first["view"], "text")
             self.assertEqual(first["format"], "acf_json")
@@ -56,9 +56,9 @@ class SiteToolsTests(unittest.TestCase):
                 site_tools.get_site_text(URL, max_chars=999)
 
     def test_site_search_matches_actual_unicode_offsets(self):
-        with patch.object(site, "_search_entries", return_value=[(URL, SITEMAP)]), patch.object(
-            site, "_read_page", return_value=PAGE,
-        ):
+        with patch.object(site, "sitemaps", return_value=[SITEMAP]), patch.object(
+            site, "urls", return_value=[URL],
+        ), patch.object(site, "read_page", return_value=PAGE):
             found = site_tools.search_site(
                 "tara", match_mode="accent_insensitive", sitemap="cursuri-sitemap.xml",
             )
@@ -84,7 +84,7 @@ class SiteToolsTests(unittest.TestCase):
         self.assertNotIn("action", tools["get_site_text"].parameters["properties"])
         self.assertNotIn("audit_ack", str(tools["get_site_text"].parameters))
         self.assertIn("source_map", tools["get_site_text"].output_schema["required"])
-        with patch.object(site, "_sitemaps", return_value=[SITEMAP]):
+        with patch.object(site, "sitemaps", return_value=[SITEMAP]):
             res = asyncio.run(tools["list_sitemaps"].run({}))
         self.assertEqual(res.structured_content["sitemaps"], [SITEMAP])
 
