@@ -5,7 +5,16 @@ always absent when MCP_RAG_ENABLED is not 1, regardless of this allowlist.
 """
 import os
 
-TOOLS = ("ping", "whoami", "inspect_site", "search_courses", "search_docs", "get_text", "get_document_context", "corpus_stats", "list_docs", "document_status", "corpus_health", "get_page_image", "show_rag_sources", "get_rag_page_data")
+TOOLS = (
+    "ping", "whoami",
+    # Task-oriented catalog tools, plus the original compatibility interfaces.
+    "list_domains", "list_courses", "get_course", "find_courses",
+    "search_courses", "inspect_site",
+    # Optional document-RAG tools.
+    "search_docs", "get_text", "get_document_context", "corpus_stats",
+    "list_docs", "document_status", "corpus_health", "get_page_image",
+    "show_rag_sources", "get_rag_page_data",
+)
 
 
 def disabled_tools() -> frozenset[str]:
