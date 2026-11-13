@@ -27,6 +27,29 @@ MCP tool `corpus_stats` or `./mcpctl rag stats "term"`.
 Two-term statistics distinguish occurrence in the same article from
 occurrence elsewhere in the same document. Results are literal, not semantic.
 
+## Private Google Search Console integration (optional, read-only)
+
+The MCP has two focused, read-only Search Console tools, **opt-in only**:
+
+- `gsc_performance(start_date, end_date, dimension="query", page_filter="", limit=25, offset=0)` — Google-reported organic web search clicks, impressions, CTR (ratio 0..1) and average position. Supported dimensions: `query`, `page`, `date`, `country`, `device`. A path such as `/cursuri/` can restrict results. Google may omit anonymized/long-tail queries; returned rows are NOT exhaustive traffic totals.
+- `gsc_inspect_url(url)` — Google's last-known **indexed** URL status, indexing verdict, canonical URLs and last crawl. This is not a live URL test or a request to index.
+
+Both tools require the existing **private MCP OAuth** and are not part of a future public marketplace deployment. They use a dedicated Google service account with **Search Console Restricted** property access and the API scope `https://www.googleapis.com/auth/webmasters.readonly`. No Search Console write endpoints are implemented. Be aware that any authenticated user of this private MCP can call enabled GSC tools; per-user GSC authorization is NOT implemented.
+
+### Setup on the VPS
+
+1. Enable **Google Search Console API** in the Google Cloud project. Grant the service-account email read access to the `tuvkarpat.ro` property in Search Console.
+2. Upload the JSON **outside the Git checkout**, then install it on the host as `/etc/tuv-mcp/credentials/gsc.json` with numeric owner `10001:10001` and mode `0400`. The credential itself must never be committed, pasted into chat or copied into the image.
+3. After `git pull --ff-only origin dev`, run `./mcpctl gsc enable`. This opt-in mounts that file **read-only** at `/run/secrets/gsc.json` inside only the MCP container. It never mounts it into PostgreSQL or RAG.
+4. Check `./mcpctl gsc status` and `./mcpctl tools list`, then refresh the connected MCP tools in ChatGPT.
+5. Try `gsc_performance` for a historic interval with finalized data and `gsc_inspect_url` on an existing course URL. These are the first calls that actually try Google authentication; CI uses mocked credentials and does not prove property access.
+
+By default, `MCP_GSC_SITE_URL=sc-domain:tuvkarpat.ro` is assumed. If the Search Console property is the **URL-prefix property** rather than a domain property, add `MCP_GSC_SITE_URL=https://tuvkarpat.ro/` to the server's private `.env` and run `./mcpctl mcp apply`. The allowed property values are limited to those two company-owned identifiers.
+
+`./mcpctl gsc disable` removes the GSC overlay and tool registrations while leaving the host key in place. `./mcpctl mcp apply` preserves enabled GSC and RAG overlays, including when both are active. No database migration is needed.
+
+Service-account keys are persistent secrets and are not as secure as Workload Identity Federation. If the key is compromised, **revoke it in Google Cloud**; removing the Docker mount alone does not revoke it. Review backup policies and rotate the key periodically. The optional GSC integration should not be enabled on a public-facing MCP endpoint.
+
 ## Dedicated course catalog search (independent of RAG)
 
 Use **`search_courses`** when asking ChatGPT or Claude to find, count or compare courses by title, ISO standard, keyword or ACF text. Unlike the general `inspect_site` search, it searches **only** `cursuri-sitemap.xml` and processes the entire course catalog in **one MCP invocation**.
