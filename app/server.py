@@ -128,6 +128,16 @@ if tool_enabled("search_courses"):
     from app.course_search import search_courses
     mcp.tool()(search_courses)
 
+# Google Search Console is strictly opt-in and restricted to the private MCP.
+# Auth credentials are loaded on tool invocation, never at application import.
+if os.environ.get("MCP_GSC_ENABLED", "0") == "1":
+    from app.gsc_tools import gsc_performance, gsc_inspect_url
+
+    for gsc_tool in (gsc_performance, gsc_inspect_url):
+        if tool_enabled(gsc_tool.__name__):
+            mcp.tool()(gsc_tool)
+
+
 # The focused catalog tools have one purpose and a typed response each.
 # Keep search_courses(action=...) for older MCP clients until migration.
 from app.catalog_tools import list_domains, list_courses, get_course, find_courses
