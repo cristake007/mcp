@@ -160,7 +160,22 @@ The website tools, course catalog/search and legacy `inspect_site` now share the
 - `app/site_inspector.py`: remaining operation orchestration and backward
   compatible entrypoints (including `_fetch`, `_read_page`, `_sitemap_xml`)
 
-The course catalog and course search no longer depend on `site_inspector.py`; the latter remains a compatibility interface. Shared request context and source identity checks are now tested independently.
+The focused tools do not depend on the two legacy action dispatchers:
+`app/site_tools.py` uses `app/site_content_service.py` for listing and source
+extraction, and `app/site_search_service.py` for lexical search.
+`app/catalog_tools.py` calls `app/course_search_service.py` directly.
+`app/site_inspector.py` and `app/course_search.py` remain **compatibility
+interfaces only**. Shared request context, source identity and legacy output
+parity are tested in CI.
+
+**Public MCP boundary (not yet implemented):** the authenticated private
+server also registers audit/RAG/administrative tools. Do **not** publish this
+server or rely solely on `MCP_DISABLED_TOOLS` for user-level isolation. A
+future marketplace-facing deployment must have its own server entrypoint,
+explicitly register only approved catalog/enrollment tools, and have its own
+authentication/rate-limiting and minimal credentials. It may reuse the
+read-only catalog and WordPress modules. No public enrollment tool, public
+OAuth configuration, or public MCP endpoint is included in this refactor.
 
 The low-level transport does **not** accept arbitrary sites or follow redirects.
 WordPress/course completeness remains checked against the public sitemap. No
