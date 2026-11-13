@@ -95,6 +95,8 @@ jobs:
           python -m tests.shared_primitives
           python -m tests.site_tools
           python -m tests.site_client
+      - name: Test dedicated tools against legacy interface contracts
+        run: python -m tests.focused_interfaces
       - name: Test selective tool registration
         run: |
           MCP_DISABLED_TOOLS=whoami python -m tests.rag_optional
