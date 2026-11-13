@@ -7,7 +7,10 @@ course sitemap. Partial data fail closed instead of silently omitting courses.
 import json
 from urllib.parse import quote
 
-from app import site_inspector as site
+from app import site_client as site
+from app.site_sitemaps import index_pages_in_sitemap
+from app.site_wordpress import slug as url_slug
+from app.html_text import visible_text
 from app.wp_api import iter_collection, read_json
 
 ROOT = site.ROOT
@@ -19,12 +22,12 @@ PAGE_SIZE = 100
 
 
 def course_urls() -> list[str]:
-    if COURSE_SITEMAP not in site._sitemaps():
+    if COURSE_SITEMAP not in site.sitemaps():
         raise RuntimeError("Sitemap-ul public al cursurilor nu există")
-    urls, _ = site._index_pages_in_sitemap(
-        COURSE_SITEMAP, site._urls(COURSE_SITEMAP))
+    urls, _ = index_pages_in_sitemap(
+        COURSE_SITEMAP, site.urls(COURSE_SITEMAP))
     return [url for url in urls if url.startswith(ROOT + "cursuri/")
-            and site._slug(url) != "cursuri"]
+            and url_slug(url) != "cursuri"]
 
 
 def domains() -> list[dict]:
@@ -32,7 +35,7 @@ def domains() -> list[dict]:
     terms = []
     seen = set()
     for entries in iter_collection(
-        site._fetch, DOMAIN_API, fields="id,name,slug,count", max_pages=50,
+        site.fetch, DOMAIN_API, fields="id,name,slug,count", max_pages=50,
     ):
         for entry in entries:
             if (not isinstance(entry, dict)
@@ -66,7 +69,7 @@ def course_summary(item: dict) -> dict:
     if not isinstance(item, dict):
         raise ValueError("Curs invalid")
     link = item.get("link")
-    site._allowed(link)
+    site.allowed(link)
     if (not link.startswith(ROOT + "cursuri/")
             or type(item.get("id")) is not int
             or not isinstance(item.get("slug"), str)
@@ -78,7 +81,7 @@ def course_summary(item: dict) -> dict:
         raise ValueError("Curs fără ID, titlu, domenii sau ACF valid")
     return {
         "id": item["id"], "slug": item["slug"], "url": link,
-        "title": site._visible_text(item["title"]["rendered"]),
+        "title": visible_text(item["title"]["rendered"]),
         "domenii": item["domenii"],
     }
 
@@ -90,7 +93,7 @@ def domain_items(domain: str | int) -> tuple[dict, list[dict]]:
     allowed = set(urls)
     found = {}
     for entries in iter_collection(
-        site._fetch, COURSE_API, fields=FIELDS,
+        site.fetch, COURSE_API, fields=FIELDS,
         filters=(("domenii", term["id"]),), max_pages=50,
     ):
         for item in entries:
@@ -119,13 +122,13 @@ def domain_urls(domain: str | int) -> tuple[dict, list[str]]:
 def get_course(course: str | int) -> dict:
     if type(course) is int and course > 0:
         endpoint = f"{COURSE_API}/{course}?_fields={FIELDS}"
-        item = read_json(site._fetch, endpoint)
+        item = read_json(site.fetch, endpoint)
         if not isinstance(item, dict) or item.get("id") != course:
             raise ValueError("REST API a returnat alt curs")
     elif isinstance(course, str) and 1 <= len(course.strip()) <= 250:
         slug = course.strip()
         endpoint = f"{COURSE_API}?slug={quote(slug, safe='')}&_fields={FIELDS}"
-        entries = json.loads(site._fetch(endpoint, "application/json"))
+        entries = json.loads(site.fetch(endpoint, "application/json"))
         if not isinstance(entries, list) or len(entries) != 1:
             raise ValueError("Curs inexistent sau ambiguu")
         item = entries[0]
