@@ -11,6 +11,7 @@ from app import site_client as site
 from app.site_sitemaps import index_pages_in_sitemap
 from app.site_wordpress import slug as url_slug
 from app.html_text import visible_text
+from app.course_integrity import course_identity, page_size_for_count
 from app.wp_api import iter_collection, read_json
 
 ROOT = site.ROOT
@@ -66,21 +67,11 @@ def resolve_domain(domain: str | int) -> dict:
 
 
 def course_summary(item: dict) -> dict:
-    if not isinstance(item, dict):
-        raise ValueError("Curs invalid")
-    link = item.get("link")
-    site.allowed(link)
-    if (not link.startswith(ROOT + "cursuri/")
-            or type(item.get("id")) is not int
-            or not isinstance(item.get("slug"), str)
-            or not isinstance(item.get("title"), dict)
-            or not isinstance(item["title"].get("rendered"), str)
-            or not isinstance(item.get("domenii"), list)
-            or not all(type(v) is int for v in item["domenii"])
-            or not isinstance(item.get("acf"), (dict, list))):
-        raise ValueError("Curs fără ID, titlu, domenii sau ACF valid")
+    course_id, link = course_identity(item)
+    if not isinstance(item.get("acf"), (dict, list)):
+        raise ValueError("Curs fără ACF valid")
     return {
-        "id": item["id"], "slug": item["slug"], "url": link,
+        "id": course_id, "slug": item["slug"], "url": link,
         "title": visible_text(item["title"]["rendered"]),
         "domenii": item["domenii"],
     }
@@ -92,9 +83,12 @@ def domain_items(domain: str | int) -> tuple[dict, list[dict]]:
     urls = course_urls()
     allowed = set(urls)
     found = {}
+    ids = set()
+    page_size = page_size_for_count(term["count"])
     for entries in iter_collection(
         site.fetch, COURSE_API, fields=FIELDS,
-        filters=(("domenii", term["id"]),), max_pages=50,
+        filters=(("domenii", term["id"]),),
+        page_size=page_size, max_pages=50,
     ):
         for item in entries:
             info = course_summary(item)
@@ -102,11 +96,12 @@ def domain_items(domain: str | int) -> tuple[dict, list[dict]]:
                 raise RuntimeError("REST API a returnat un curs din alt domeniu")
             if info["url"] not in allowed:
                 raise RuntimeError("Cursul din domeniu lipsește din sitemap: " + info["url"])
-            if info["url"] in found:
+            if info["url"] in found or info["id"] in ids:
                 raise RuntimeError("Curs duplicat în REST API: " + info["url"])
             found[info["url"]] = item
-        if len(found) >= term["count"]:
-            break
+            ids.add(info["id"])
+            if len(found) > term["count"]:
+                raise RuntimeError("REST API a returnat mai multe cursuri decât declară domeniul")
     if len(found) != term["count"]:
         raise RuntimeError(
             f"Domeniul {term['slug']} declară {term['count']} cursuri, "
