@@ -9,7 +9,7 @@ MAIN_ENV="$ROOT/.env"
 RAG_ENV="$RAG/.env"
 RAG_FLAG="$ROOT/.mcp-rag-enabled"
 cd "$ROOT"
-TOOLS=(ping whoami inspect_site search_courses list_domains list_courses get_course find_courses
+TOOLS=(ping whoami inspect_site search_courses list_domains list_courses get_course find_courses list_sitemaps list_site_urls get_site_text search_site
        search_docs get_text get_document_context corpus_stats list_docs document_status
        corpus_health get_page_image show_rag_sources get_rag_page_data)
 
@@ -50,6 +50,7 @@ MCP Control — comenzi administrative (din orice director)
   ./mcpctl mcp logs                  Urmareste logurile MCP
 
 Tool-uri: ping, whoami, inspect_site, search_courses, list_domains, list_courses, get_course, find_courses,
+          list_sitemaps, list_site_urls, get_site_text, search_site,
           search_docs, get_text, get_document_context, corpus_stats,
           list_docs, document_status, corpus_health, get_page_image, show_rag_sources, get_rag_page_data
 Exemple:
