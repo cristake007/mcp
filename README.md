@@ -37,7 +37,7 @@ Use **`search_courses`** when asking ChatGPT or Claude to find, count or compare
 
 Search the common identifier (e.g. `29001`) to find inconsistent spellings such as `ISO 29001:2020`, `ISO/TS 29001:2020` and `ISO / TS 29001:2020`. `queries` supports 1–10 literal phrases (OR semantics). Modes: `contains` (case-insensitive), `whole_word` or `accent_insensitive`. Results list the matching course URLs, titles, original field paths, snippets and per-field occurrence counts; no content is rewritten.
 
-The server first reads the public sitemap, then uses the WordPress REST **course collection** (100 entries per page) instead of 195 individual HTTP requests. Missing/incomplete REST entries are individually recovered, up to a bounded fallback limit. The output includes `total_courses`, `scanned_courses`, `matching_courses`, `errors`, `missing_courses_count` and `complete`. **Never claim a complete result unless `complete=true`**. A blocked REST endpoint or missing ACF fields is reported as incomplete, not silently treated as zero matches. The sitemap is the scope: unpublished/unlisted courses and JavaScript-only text are not searched. `force_refresh=true` bypasses the MCP sitemap cache and asks intermediaries for revalidation, without guaranteeing origin freshness.
+The server first reads the public sitemap, then uses the WordPress REST **course collection** (up to 100 entries per page, adjusting page size at exact count boundaries) instead of 195 individual HTTP requests. Missing/incomplete REST entries are individually recovered, up to a bounded fallback limit. The output includes `total_courses`, `scanned_courses`, `matching_courses`, `errors`, `missing_courses_count` and `complete`. **Never claim a complete result unless `complete=true`**. A blocked REST endpoint or missing ACF fields is reported as incomplete, not silently treated as zero matches. The sitemap is the scope: unpublished/unlisted courses and JavaScript-only text are not searched. `force_refresh=true` bypasses the MCP sitemap cache and asks intermediaries for revalidation, without guaranteeing origin freshness.
 
 ### Focused catalog tools (recommended for new MCP clients)
 
@@ -56,6 +56,20 @@ For example `{"domain":"ergonomie","limit":25}` is a complete
 server-side taxonomy filtering; catalog completeness is reconciled against the
 public sitemap and taxonomy counts. The underlying search/ACF extraction and
 Unicode matcher are shared with the older interfaces.
+
+**Integrity and completeness:** Course records are checked for canonical URL,
+matching slug, unique ID, title and domain metadata. Duplicate REST entries or
+courses not present in the public sitemap cause an incomplete result or a
+fail-closed domain error. Global catalog listings return `complete=false` and
+an explicit error instead of presenting a corrupt REST collection as complete.
+Domain-specific listings additionally verify the WordPress taxonomy count.
+Individual missing ACF content may still be recovered using an exact URL check;
+recovery does not erase previously observed collection integrity errors.
+No separate WordPress database inventory is available: if the same published
+course is omitted from BOTH sitemap and REST, neither can independently prove
+that omission. Therefore `complete=true` means complete relative to the
+current public sitemap and retrieved REST responses, not a database-wide
+guarantee.
 
 The default FastMCP server is still private and exposes legacy administration
 tools to its authenticated users. These catalog tool changes do **not**
