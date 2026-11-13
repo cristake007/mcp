@@ -27,7 +27,9 @@ class SearchServiceTests(unittest.TestCase):
         self.assertEqual(result["scanned"], 2)
         self.assertEqual(result["query_totals"][0]["matching_urls"], 2)
         self.assertEqual(result["query_totals"][1]["occurrences"], 2)
-        self.assertEqual(result["matches"][0]["terms"][0]["positions"][0]["end"], 4)
+        span = result["matches"][0]["terms"][0]["positions"][0]
+        source = service.as_search_text(read(URL1))
+        self.assertEqual(source[span["start"]:span["end"]], "Țară")
         self.assertEqual(calls, [URL1, URL2])
 
     def test_context_is_isolated_per_thread(self):
