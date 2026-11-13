@@ -146,7 +146,9 @@ The website tools, course catalog/search and legacy `inspect_site` now share the
 - `app/site_inspector.py`: remaining operation orchestration and backward
   compatible entrypoints (including `_fetch`, `_read_page`, `_sitemap_xml`)
 
-The course catalog and course search no longer depend on `site_inspector.py`; the latter remains a compatibility interface. Shared request context and source identity checks are now tested independently.\n\nThe low-level transport does **not** accept arbitrary sites or follow redirects.
+The course catalog and course search no longer depend on `site_inspector.py`; the latter remains a compatibility interface. Shared request context and source identity checks are now tested independently.
+
+The low-level transport does **not** accept arbitrary sites or follow redirects.
 WordPress/course completeness remains checked against the public sitemap. No
 database migration, OAuth change or extra plugin permission was introduced.
 The old inspector tool remains available; removing it requires a separate
