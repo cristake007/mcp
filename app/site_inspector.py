@@ -15,11 +15,9 @@ import re
 import subprocess
 import threading
 import time
-import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote, urlsplit
 
-from bs4 import BeautifulSoup
 
 from app.site_output import SiteInspectionResult
 from app.site_sitemaps import (
@@ -27,7 +25,7 @@ from app.site_sitemaps import (
     index_pages_in_sitemap as _index_pages_in_sitemap,
 )
 from app.site_text import as_search_text as _as_search_text, page_chunks as _page_chunks
-from app.html_text import visible_text as _visible_text
+from app.html_text import visible_text as _visible_text, clean_html as _clean_html
 from app.site_fields import normalize_fields, extract_with_sources, slice_sources
 from app.text_matching import TextMatcher, accent_fold_with_positions
 
@@ -36,11 +34,6 @@ SITEMAP_INDEX = ROOT + "sitemap_index.xml"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) "
     "Gecko/20100101 Firefox/128.0"
-)
-REMOVE_HTML = (
-    "script, meta, iframe, noscript, "
-    "body > header, body > footer, "
-    ".elementor-location-header, .elementor-location-footer"
 )
 MAX_SOURCE_BYTES = 4_000_000
 _REFRESH = contextvars.ContextVar("site_refresh", default=False)
@@ -217,14 +210,6 @@ def _urls(sitemap_url: str) -> list[str]:
         except ValueError:
             continue
     return list(dict.fromkeys(urls))
-
-
-def _clean_html(raw: str) -> str:
-    soup = BeautifulSoup(raw, "html.parser")
-    for element in soup.select(REMOVE_HTML):
-        element.decompose()
-    # Do not prettify: inserted indentation/newlines can split inline words.
-    return str(soup.body or soup)
 
 
 def _slug(url: str) -> str:
