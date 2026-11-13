@@ -7,7 +7,7 @@ clients migrate; both routes call the same catalog/search implementations.
 from typing import Literal, NotRequired, TypedDict
 
 from app import course_catalog as catalog
-from app import course_search as legacy
+from app import course_search_service as engine
 from app import site_client as site
 
 
@@ -43,7 +43,7 @@ class CourseListing(TypedDict):
     complete: bool
     missing_courses_count: int
     courses: list[CourseSummary]
-    errors: list[legacy.CourseError]
+    errors: list[engine.CourseError]
     domain: NotRequired[Domain]
 
 
@@ -54,8 +54,8 @@ class CourseFindResult(TypedDict):
     complete: bool
     missing_courses_count: int
     missing_urls: list[str]
-    matches: list[legacy.CourseMatch]
-    errors: list[legacy.CourseError]
+    matches: list[engine.CourseMatch]
+    errors: list[engine.CourseError]
     domain: NotRequired[Domain]
 
 
@@ -90,9 +90,7 @@ def list_courses(
         raise ValueError("limit must be 1..100")
     if type(force_refresh) is not bool:
         raise ValueError("force_refresh must be boolean")
-    result = legacy.search_courses(
-        action="list_courses", domain=domain, force_refresh=force_refresh,
-    )
+    result = engine.list_catalog_courses(domain=domain, force_refresh=force_refresh)
     courses = result["courses"]
     subset = courses[offset:offset + limit]
     next_offset = offset + len(subset)
@@ -131,7 +129,7 @@ def find_courses(
     supply a real WordPress domain ID/slug, not a domain keyword.
     complete=false means source coverage is incomplete.
     """
-    result = legacy.search_courses(
+    result = engine.search_catalog(
         queries=[query], match_mode=match_mode,
         domain=domain, force_refresh=force_refresh,
     )
