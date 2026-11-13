@@ -30,7 +30,7 @@ class CatalogToolsTests(unittest.TestCase):
             "missing_courses_count": 0, "errors": [],
             "domain": {"id": 123, "name": "Ergonomie", "slug": "ergonomie", "count": 3},
         }
-        with patch.object(catalog_tools.legacy, "search_courses", return_value=response) as search:
+        with patch.object(catalog_tools.engine, "list_catalog_courses", return_value=response) as search:
             first = catalog_tools.list_courses(domain=123, limit=2)
             second = catalog_tools.list_courses(domain=123, offset=2, limit=2)
         self.assertEqual(first["returned"], 2)
@@ -38,7 +38,7 @@ class CatalogToolsTests(unittest.TestCase):
         self.assertEqual(second["returned"], 1)
         self.assertIsNone(second["next_offset"])
         self.assertEqual(second["courses"][0]["id"], 3)
-        search.assert_any_call(action="list_courses", domain=123, force_refresh=False)
+        search.assert_any_call(domain=123, force_refresh=False)
         TypeAdapter(catalog_tools.CourseListing).validate_python(first)
         with self.assertRaises(ValueError):
             catalog_tools.list_courses(limit=101)
@@ -57,7 +57,7 @@ class CatalogToolsTests(unittest.TestCase):
             "complete": True, "missing_courses_count": 0, "missing_urls": [],
             "matches": [], "errors": [],
         }
-        with patch.object(catalog_tools.legacy, "search_courses", return_value=search_result) as search:
+        with patch.object(catalog_tools.engine, "search_catalog", return_value=search_result) as search:
             found = catalog_tools.find_courses("29001", domain="calitate")
         search.assert_called_once_with(
             queries=["29001"], match_mode="contains", domain="calitate", force_refresh=False,
