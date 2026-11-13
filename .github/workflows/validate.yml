@@ -83,6 +83,10 @@ jobs:
         run: python -m tests.audit_operations
       - name: Test extracted site search service
         run: python -m tests.search_service
+      - name: Test isolated site transport, WordPress and refresh contracts
+        run: |
+          python -m tests.site_clients
+          python -m tests.test_site_refresh
       - name: Test focused MCP catalog contracts and shared primitives
         run: |
           python -m tests.catalog_tools
