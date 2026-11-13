@@ -24,6 +24,7 @@ from urllib.parse import quote, urlsplit
 from bs4 import BeautifulSoup
 
 from app.site_output import SiteInspectionResult
+from app.site_fields import normalize_fields, extract_with_sources, slice_sources
 
 ROOT = "https://tuvkarpat.ro/"
 SITEMAP_INDEX = ROOT + "sitemap_index.xml"
@@ -1115,7 +1116,6 @@ def inspect_site(
         return invalid("view", view, "'raw' sau 'text'", "raw")
 
 
-    from app.site_fields import normalize_fields, extract_with_sources, slice_sources
     selectors = normalize_fields(fields)
 
     if action == "verify_findings":
