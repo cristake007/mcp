@@ -24,6 +24,7 @@ from urllib.parse import quote, urlsplit
 from bs4 import BeautifulSoup
 
 from app.site_output import SiteInspectionResult
+from app.text_matching import TextMatcher, accent_fold_with_positions
 from app.site_fields import normalize_fields, extract_with_sources, slice_sources
 
 ROOT = "https://tuvkarpat.ro/"
@@ -477,57 +478,20 @@ def _search_one(entry: tuple[str, str], query: str) -> dict | None:
 
 
 def _accent_fold_with_positions(value: str) -> tuple[str, list[int]]:
-    """Case/accent-fold Unicode while retaining source character offsets.
-
-    A folded Unicode character can expand (e.g. casefold of 'ß'), so simply
-    using indexes from a normalized string would misquote source passages.
-    """
-    folded = []
-    positions = []
-    for index, char in enumerate(value):
-        normalized = "".join(
-            part for part in unicodedata.normalize("NFD", char)
-            if unicodedata.category(part) != "Mn"
-        ).casefold()
-        for part in normalized:
-            folded.append(part)
-            positions.append(index)
-    return "".join(folded), positions
+    """Legacy wrapper for callers using the site-inspection module."""
+    return accent_fold_with_positions(value)
 
 
 def _search_many_one(
     entry: tuple[str, str], queries: list[str], match_mode: str,
 ) -> dict | None:
-    """Fetch a page once and match every requested term against its text."""
+    """Read each page once and reuse a normalized matcher for every term."""
     url, sitemap = entry
     content = _as_search_text(_read_page(url))
-    folded_content = ""
-    positions = []
-    if match_mode == "accent_insensitive":
-        folded_content, positions = _accent_fold_with_positions(content)
-
+    matcher = TextMatcher(content, match_mode)
     found = []
     for query in queries:
-        if match_mode == "accent_insensitive":
-            folded_query, _ = _accent_fold_with_positions(query)
-            if not folded_query:
-                # Validation also prevents accent-only queries.
-                continue
-            hits = []
-            start = 0
-            while True:
-                pos = folded_content.find(folded_query, start)
-                if pos < 0:
-                    break
-                hits.append((positions[pos], positions[pos + len(folded_query) - 1] + 1))
-                start = pos + len(folded_query)
-        else:
-            boundary = match_mode == "whole_word"
-            pattern = re.escape(query)
-            if boundary:
-                pattern = r"(?<!\w)" + pattern + r"(?!\w)"
-            hits = [match.span() for match in re.finditer(pattern, content, re.IGNORECASE)]
-
+        hits = matcher.positions(query)
         if not hits:
             continue
         found.append({
@@ -542,7 +506,6 @@ def _search_many_one(
     if not found:
         return None
     return {"url": url, "sitemap": sitemap, "terms": found}
-
 
 
 def _search_entries(sitemap: str) -> list[tuple[str, str]]:
