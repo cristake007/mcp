@@ -7,7 +7,10 @@ clients. All operations use the same allowlisted site backend and evidence rules
 import re
 from typing import Any, Literal, NotRequired, TypedDict
 
-from app import site_inspector as site
+from app import site_client as site
+from app import site_content_service as content_service
+from app import site_search_service as search_service
+from app import course_catalog as catalog
 from app.site_fields import normalize_fields
 from app.site_output import SiteSourceSpan
 
@@ -93,7 +96,7 @@ def _validate_window(offset: int, limit: int, max_limit: int) -> None:
         raise ValueError(f"limit must be an integer between 1 and {max_limit}")
 
 
-@site._refresh_scope
+@site.refresh_scope
 def list_sitemaps(force_refresh: bool = False) -> SitemapList:
     """List the public XML sitemaps of tuvkarpat.ro.
 
@@ -101,10 +104,10 @@ def list_sitemaps(force_refresh: bool = False) -> SitemapList:
     """
     if type(force_refresh) is not bool:
         raise ValueError("force_refresh must be boolean")
-    return {"sitemaps": site._sitemaps()}
+    return {"sitemaps": site.sitemaps()}
 
 
-@site._refresh_scope
+@site.refresh_scope
 def list_site_urls(
     sitemap: str = "",
     domain: str | int | None = None,
@@ -123,11 +126,14 @@ def list_site_urls(
         raise ValueError("force_refresh must be boolean")
     if domain is None and not sitemap:
         raise ValueError("Provide a sitemap or WordPress domain")
-    result = site._inspect_urls(sitemap, domain, offset, limit)
-    return {key: value for key, value in result.items() if key != "action"}
+    return content_service.list_urls(
+        sitemap, domain, offset, limit, known_sitemaps=site.sitemaps,
+        select_sitemap=site.sitemap_url, sitemap_urls=site.urls,
+        domain_urls=catalog.domain_urls,
+    )
 
 
-@site._refresh_scope
+@site.refresh_scope
 def get_site_text(
     url: str,
     fields: list[str] | None = None,
@@ -152,14 +158,13 @@ def get_site_text(
         raise ValueError("expected_hash must be an empty string or lowercase SHA-256")
     if type(force_refresh) is not bool:
         raise ValueError("force_refresh must be boolean")
-    result = site._inspect_get(
+    return content_service.get_page(
         url, "text", normalize_fields(fields), part, max_chars,
-        expected_hash, force_refresh,
+        expected_hash, force_refresh, load_page=site.load_page,
     )
-    return {key: value for key, value in result.items() if key != "action"}
 
 
-@site._refresh_scope
+@site.refresh_scope
 def search_site(
     query: str,
     sitemap: str = "",
@@ -177,12 +182,20 @@ def search_site(
     _validate_window(offset, limit, 20)
     if type(force_refresh) is not bool:
         raise ValueError("force_refresh must be boolean")
-    from app.site_search_service import search_many
+    def entries(selected):
+        return content_service.search_entries(
+            selected, known_sitemaps=site.sitemaps,
+            select_sitemap=site.sitemap_url, sitemap_urls=site.urls,
+        )
 
-    result = search_many(
+    def inspect_one(entry, terms, mode):
+        return search_service.search_many_one(
+            entry, terms, mode, read_page=site.read_page,
+        )
+
+    result = search_service.search_many(
         [query], match_mode, sitemap, offset, limit,
-        list_entries=site._search_entries,
-        inspect_one=site._search_many_one,
+        list_entries=entries, inspect_one=inspect_one,
     )
     return {
         "query": query,
