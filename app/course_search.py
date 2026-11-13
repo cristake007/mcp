@@ -8,7 +8,10 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Literal, NotRequired, TypedDict
 
-from app import site_inspector as site
+from app import site_client as site
+from app.site_sitemaps import index_pages_in_sitemap
+from app.site_wordpress import slug as url_slug
+from app.html_text import visible_text
 from app.site_fields import extract_with_sources
 from app.text_matching import find_positions
 from app.wp_api import iter_collection
@@ -130,7 +133,7 @@ def _match_course(url: str, item: dict, queries: list[str], match_mode: str) -> 
             terms.append({"query": query, "occurrences": occurrences, "fields": fields})
     if not terms:
         return None
-    return {"url": url, "title": site._visible_text(item["title"]["rendered"]),
+    return {"url": url, "title": visible_text(item["title"]["rendered"]),
             "terms": terms}
 
 
@@ -143,7 +146,7 @@ def _collection(sitemap_urls: list[str]) -> dict[str, dict]:
     catalog = {}
     max_pages = (len(allowed) + PAGE_SIZE - 1) // PAGE_SIZE + 5
     for items in iter_collection(
-        site._fetch, COURSE_API, fields="id,link,title,acf,domenii,slug",
+        site.fetch, COURSE_API, fields="id,link,title,acf,domenii,slug",
         page_size=PAGE_SIZE, max_pages=max_pages,
     ):
         for item in items:
@@ -158,7 +161,7 @@ def _collection(sitemap_urls: list[str]) -> dict[str, dict]:
 
 
 def _recover(url: str, refresh: bool) -> dict:
-    data, _ = site._load_page(url, refresh, exact_url=True)
+    data, _ = site.load_page(url, refresh, exact_url=True)
     if data.get("format") != "acf_json" or data.get("link") != url:
         raise ValueError("REST API nu corespunde cursului din sitemap")
     return {"link": url, "title": {"rendered": data.get("title", "")},
@@ -188,12 +191,12 @@ def _search_original(
     if type(force_refresh) is not bool:
         raise ValueError("force_refresh trebuie să fie boolean")
     queries = _validate_queries(queries, match_mode)
-    if COURSE_SITEMAP not in site._sitemaps():
+    if COURSE_SITEMAP not in site.sitemaps():
         raise RuntimeError("Sitemap-ul cursurilor nu există în indexul public")
-    urls, _ = site._index_pages_in_sitemap(COURSE_SITEMAP, site._urls(COURSE_SITEMAP))
+    urls, _ = index_pages_in_sitemap(COURSE_SITEMAP, site.urls(COURSE_SITEMAP))
     # Guard against non-course URLs inserted into the public sitemap.
     urls = [url for url in urls if url.startswith(site.ROOT + "cursuri/")
-            and site._slug(url) != "cursuri"]
+            and url_slug(url) != "cursuri"]
     errors: list[CourseError] = []
     try:
         catalog = _collection(urls)
@@ -343,7 +346,7 @@ def _search_catalog_domain(
     return result
 
 
-@site._refresh_scope
+@site.refresh_scope
 def search_courses(
     queries: list[str] | None = None,
     match_mode: Literal["contains", "whole_word", "accent_insensitive"] = "contains",
