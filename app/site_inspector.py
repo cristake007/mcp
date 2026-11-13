@@ -14,6 +14,7 @@ import json
 import re
 import subprocess
 import threading
+import xml.etree.ElementTree as ET
 import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote, urlsplit
