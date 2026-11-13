@@ -8,7 +8,7 @@ from typing import Literal, NotRequired, TypedDict
 
 from app import course_catalog as catalog
 from app import course_search as legacy
-from app import site_inspector as site
+from app import site_client as site
 
 
 class Domain(TypedDict):
@@ -59,7 +59,7 @@ class CourseFindResult(TypedDict):
     domain: NotRequired[Domain]
 
 
-@site._refresh_scope
+@site.refresh_scope
 def list_domains(force_refresh: bool = False) -> DomainListing:
     """List the genuine WordPress 'domenii' taxonomy with IDs and course counts.
 
@@ -71,7 +71,7 @@ def list_domains(force_refresh: bool = False) -> DomainListing:
     return {"total_domains": len(values), "domains": values}
 
 
-@site._refresh_scope
+@site.refresh_scope
 def list_courses(
     domain: str | int | None = None,
     offset: int = 0,
@@ -111,7 +111,7 @@ def list_courses(
     return response
 
 
-@site._refresh_scope
+@site.refresh_scope
 def get_course(course: str | int, force_refresh: bool = False) -> CourseDetail:
     """Get one published course by WordPress ID or exact slug, including full ACF."""
     if type(force_refresh) is not bool:
