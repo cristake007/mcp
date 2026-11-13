@@ -3,9 +3,6 @@
 Uses the same browser headers and curl transport that were validated manually.
 No RAG, embeddings, database, arbitrary shell expressions or external domains.
 """
-import contextvars
-import functools
-import inspect
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -17,6 +14,7 @@ from urllib.parse import urlsplit
 
 
 from app import site_transport as transport, site_wordpress as wordpress
+from app import site_client as client
 from app import site_sitemap_reader as sitemap_reader
 from app.site_output import SiteInspectionResult
 from app.site_sitemaps import (
@@ -37,36 +35,16 @@ _EVIDENCE = transport._EVIDENCE
 _EXACT_URL = transport._EXACT_URL
 
 
-def _refresh_scope(function):
-    signature = inspect.signature(function)
-
-    @functools.wraps(function)
-    def wrapped(*args, **kwargs):
-        token = _REFRESH.set(signature.bind_partial(*args, **kwargs).arguments.get("force_refresh", False))
-        try:
-            return function(*args, **kwargs)
-        finally:
-            _REFRESH.reset(token)
-    return wrapped
+# Preserve the legacy inspection API while using the shared site client.
+_refresh_scope = client.refresh_scope
 
 
 def _load_page(url, force_refresh=False, exact_url=False):
-    refresh = _REFRESH.set(force_refresh)
-    identity = _EXACT_URL.set(exact_url)
-    evidence = []
-    token = _EVIDENCE.set(evidence)
-    try:
-        data = _read_page(url)
-        return data, {
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
-            # A MISS/BYPASS or absence of cache headers does not prove origin.
-            "provenance": "cache" if any(e["cache_hit"] for e in evidence) else "unknown",
-            "http_evidence": evidence,
-        }
-    finally:
-        _EVIDENCE.reset(token)
-        _REFRESH.reset(refresh)
-        _EXACT_URL.reset(identity)
+    """Backward-compatible loader preserving the inspector's mock seam."""
+    return client.load_page(
+        url, force_refresh, exact_url,
+        reader=_read_page, now=lambda: datetime.now(timezone.utc),
+    )
 
 
 # Keep legacy cache handles for callers that inspect or reset the cache.
