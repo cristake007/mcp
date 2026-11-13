@@ -386,169 +386,45 @@ def _search_entries(sitemap: str) -> list[tuple[str, str]]:
 
 
 def _quote_matches(text, spans, quote, cap=None):
-    matches = []
-    total = 0
-    for span in spans:
-        value = text[span["content_start"]:span["content_end"]]
-        cursor = 0
-        while True:
-            pos = value.find(quote, cursor)
-            if pos < 0:
-                break
-            total += 1
-            if cap is None or len(matches) < cap:
-                matches.append({
-                    "field": span["field"], "start": pos, "end": pos + len(quote),
-                    "context": value[max(0, pos - 80):pos + len(quote) + 80],
-                })
-            cursor = pos + 1 if cap is None else pos + len(quote)
-    return total, matches
+    """Compatibility wrapper for existing users of the inspector module."""
+    from app.site_audit_operations import quote_matches
+    return quote_matches(text, spans, quote, cap)
 
 
 def _verify_findings(findings, selectors, force_refresh):
-    if not isinstance(findings, list) or not 1 <= len(findings) <= 100:
-        raise ValueError("verify_findings necesită 1..100 observații")
-    pages = {}
-    results = []
-    for finding in findings:
-        result = {"status": "error"}
-        if isinstance(finding, dict):
-            result.update({k: finding[k] for k in (
-                "url", "field", "original", "replacement", "expected_hash") if k in finding})
-        try:
-            if not isinstance(finding, dict):
-                raise ValueError("Observația trebuie să fie un obiect")
-            item_url = _allowed(finding.get("url"))
-            field = finding.get("field")
-            normalized = normalize_fields([field])
-            if normalized[0] != field:
-                raise ValueError("field trebuie să fie calea exactă din source_map")
-            original = finding.get("original")
-            if not isinstance(original, str) or not 1 <= len(original) <= 10000:
-                raise ValueError("original trebuie să conțină 1..10000 caractere")
-            if not isinstance(finding.get("replacement"), str):
-                raise ValueError("replacement trebuie să fie text")
-            expected = finding.get("expected_hash", "")
-            if not isinstance(expected, str) or (expected and not re.fullmatch(r"[0-9a-f]{64}", expected)):
-                raise ValueError("expected_hash invalid")
-            if item_url not in pages:
-                try:
-                    pages[item_url] = _load_page(item_url, force_refresh, exact_url=True)
-                except (RuntimeError, ValueError) as exc:
-                    pages[item_url] = exc
-            page = pages[item_url]
-            if isinstance(page, Exception):
-                raise page
-            data, metadata = page
-            result.update(metadata)
-            # REST slug lookup alone does not establish exact course identity.
-            if data.get("link", item_url) != item_url:
-                raise ValueError("URL-ul REST nu corespunde exact URL-ului observației")
-            full, warnings, spans, _ = extract_with_sources(data)
-            content, hash_warnings, _, missing = extract_with_sources(data, selectors)
-            result.update(sha256=_page_chunks(content, 0, max(1, len(content)))["sha256"],
-                          warnings=warnings + hash_warnings, missing_fields=missing)
-            if warnings or hash_warnings or missing or data.get("content_complete") is False:
-                raise ValueError("Sursa nu a putut fi citită integral")
-            exact = [span for span in spans if span["field"] == field]
-            count, matches = _quote_matches(full, exact, original)
-            result.update(occurrences=count, matches=matches)
-            if expected and expected != result["sha256"]:
-                result["status"] = "content_changed"
-            elif not exact:
-                result["status"] = "field_not_found"
-            else:
-                result["status"] = "verified" if count else "not_found"
-        except (ValueError, RuntimeError, TypeError, KeyError) as exc:
-            result.update(status="error", error=str(exc)[:300])
-        results.append(result)
-    return {"action": "verify_findings", "results": results,
-            "fields": list(selectors) if selectors is not None else None,
-            "note": "verified confirmă numai prezența exactă în textul vizibil al câmpului; "
-                    "nu confirmă corectitudinea lingvistică. Hash-ul folosește selecția fields "
-                    "din get(view='text'). Pozițiile sunt caractere Unicode, cu end exclusiv."}
+    """Verify source findings via the dedicated audit service."""
+    from app.site_audit_operations import verify_findings
+    return verify_findings(
+        findings, selectors, force_refresh,
+        allowed=_allowed, load_page=_load_page,
+    )
 
 
 # Independent operation handlers keep the MCP entrypoint focused on input
 # validation and routing. The legacy action interface remains compatible.
 
 def _inspect_verify_quote(url, field, quote):
-    """Implementation of the verify_quote site-inspection operation."""
-    action = "verify_quote"
-    if not url:
-        raise ValueError("verify_quote necesită url")
-    field_selector = normalize_fields([field])
-    if not isinstance(quote, str) or not 1 <= len(quote) <= 500:
-        raise ValueError("quote trebuie să conțină 1..500 caractere")
-    data = _read_page(url)
-    text, warnings, spans, missing = extract_with_sources(data, field_selector)
-    total_matches, matches = _quote_matches(text, spans, quote, cap=20)
-    return {
-        "action": action, "url": url, "field": field_selector[0],
-        "quote": quote, "verified": total_matches > 0,
-        "occurrences": total_matches, "matches": matches,
-        "warnings": warnings, "missing_fields": missing,
-        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-        "note": "Potrivire exactă în textul vizibil normalizat al câmpului; "
-                "nu confirmă corectitudinea propunerii lingvistice.",
-    }
+    """Compatibility adapter preserving legacy tool response and mock seams."""
+    from app.site_audit_operations import verify_quote
+    return verify_quote(url, field, quote, read_page=_read_page)
 
 
-def _inspect_audit_ack(url, expected_hash, reviews, selectors):
-    """Implementation of the audit_ack site-inspection operation."""
-    action = "audit_ack"
-    from app.site_audit import save_reviews
-    entries = reviews if reviews is not None else [{"url": url, "sha256": expected_hash}]
-    if not isinstance(entries, list) or not 1 <= len(entries) <= 10:
-        raise ValueError("audit_ack necesită 1..10 înregistrări")
-    saved = []
-    seen = set()
-    for entry in entries:
-        if not isinstance(entry, dict) or set(entry) != {"url", "sha256"}:
-            raise ValueError("Fiecare review necesită numai url și sha256")
-        item_url, checksum = entry["url"], entry["sha256"]
-        _allowed(item_url)
-        if item_url in seen:
-            raise ValueError("URL duplicat în audit_ack")
-        seen.add(item_url)
-        if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum):
-            raise ValueError("SHA-256 invalid în audit_ack")
-        data = _read_page(item_url)
-        content, warnings, _, missing = extract_with_sources(data, selectors)
-        if warnings or missing:
-            raise ValueError("Nu se poate confirma conținut incomplet: " + item_url)
-        current = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        if current != checksum:
-            raise ValueError("Conținutul s-a schimbat: " + item_url)
-        saved.append((item_url, current))
-    # This is the only operation that marks a page as reviewed.
-    save_reviews(saved, selectors)
-    return {
-        "action": action, "reviewed": len(saved),
-        "fields": list(selectors) if selectors is not None else None,
-        "coverage": "selected" if selectors is not None else "all",
-        "urls": [item_url for item_url, _ in saved],
-        "note": "Confirmare explicită; nu reprezintă validare gramaticală automată.",
-    }
+def _inspect_audit_ack(url, expected_hash, reviews, selectors, force_refresh=False):
+    """Explicit acknowledgement; audit logic lives outside this MCP adapter."""
+    from app.site_audit_operations import acknowledge
+    return acknowledge(
+        url, expected_hash, reviews, selectors,
+        allowed=_allowed, load_page=_load_page, force_refresh=force_refresh,
+    )
 
 
 def _inspect_audit_report(sitemap, selectors, offset, limit):
-    """Implementation of the audit_report site-inspection operation."""
-    action = "audit_report"
-    if not sitemap or sitemap == "all":
-        raise ValueError("audit_report necesită un singur sitemap explicit")
-    from app.site_audit import review_coverage
-    selected = _sitemap_url(sitemap, _sitemaps())
-    urls = _urls(selected)
-    eligible, skipped = _index_pages_in_sitemap(selected, urls)
-    report = review_coverage(eligible, selectors, offset, limit)
-    return {
-        "action": action, "sitemap": selected, "total_urls": len(urls),
-        "skipped_index_urls": skipped,
-        "fields": list(selectors) if selectors is not None else None,
-        "coverage": "selected" if selectors is not None else "all",
-        **report,
-    }
+    """Read persisted audit coverage through the audit service."""
+    from app.site_audit_operations import audit_report
+    return audit_report(
+        sitemap, selectors, offset, limit,
+        sitemaps=_sitemaps, sitemap_url=_sitemap_url, urls=_urls,
+    )
 
 
 def _inspect_urls(sitemap, domain, offset, limit):
@@ -951,7 +827,7 @@ def inspect_site(
         return _inspect_verify_quote(url, field, quote)
 
     if action == "audit_ack":
-        return _inspect_audit_ack(url, expected_hash, reviews, selectors)
+        return _inspect_audit_ack(url, expected_hash, reviews, selectors, force_refresh)
 
     if action == "sitemaps":
         return {"action": action, "sitemaps": _sitemaps()}
