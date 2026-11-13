@@ -18,7 +18,11 @@ INTRO = ARCHIVE + "prezentare-29001/"
 
 
 def item(url, title, acf):
-    return {"link": url, "title": {"rendered": title}, "acf": acf}
+    slug = url.rstrip("/").rsplit("/", 1)[-1]
+    ids = {"auditor-29001": 1, "manager-29001": 2,
+           "prezentare-29001": 3}
+    return {"id": ids[slug], "slug": slug, "domenii": [123],
+            "link": url, "title": {"rendered": title}, "acf": acf}
 
 
 class CourseSearchTests(unittest.TestCase):
