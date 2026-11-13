@@ -6,20 +6,20 @@ No RAG, embeddings, database, arbitrary shell expressions or external domains.
 import contextvars
 import functools
 import inspect
-import tempfile
-import uuid
 from datetime import datetime, timezone
 import hashlib
 import json
 import re
+# Kept as a compatibility module reference for existing test/diagnostic code.
 import subprocess
 import threading
 import xml.etree.ElementTree as ET
 import time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 
 
+from app import site_transport as transport, site_wordpress as wordpress
 from app.site_output import SiteInspectionResult
 from app.site_sitemaps import (
     xml_locations as _xml_locations,
@@ -30,16 +30,13 @@ from app.html_text import visible_text as _visible_text, clean_html as _clean_ht
 from app.site_fields import normalize_fields, extract_with_sources, slice_sources
 from app.text_matching import accent_fold_with_positions
 
-ROOT = "https://tuvkarpat.ro/"
+ROOT = transport.ROOT
 SITEMAP_INDEX = ROOT + "sitemap_index.xml"
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) "
-    "Gecko/20100101 Firefox/128.0"
-)
-MAX_SOURCE_BYTES = 4_000_000
-_REFRESH = contextvars.ContextVar("site_refresh", default=False)
-_EVIDENCE = contextvars.ContextVar("site_evidence", default=None)
-_EXACT_URL = contextvars.ContextVar("site_exact_url", default=False)
+USER_AGENT = transport.USER_AGENT
+MAX_SOURCE_BYTES = transport.MAX_SOURCE_BYTES
+_REFRESH = transport._REFRESH
+_EVIDENCE = transport._EVIDENCE
+_EXACT_URL = transport._EXACT_URL
 
 
 def _refresh_scope(function):
@@ -105,81 +102,13 @@ def _sitemap_xml(url: str) -> str:
 
 
 def _allowed(url: str) -> str:
-    """Do not accept arbitrary URLs, redirects, ports or userinfo."""
-    if not isinstance(url, str) or any(c in url for c in "\r\n\x00"):
-        raise ValueError("URL invalid")
-    parsed = urlsplit(url)
-    if (
-        parsed.scheme != "https"
-        or parsed.netloc != "tuvkarpat.ro"
-        or parsed.fragment
-        or not parsed.path.startswith("/")
-    ):
-        raise ValueError("Sunt acceptate doar URL-uri HTTPS de pe tuvkarpat.ro")
-    return url
+    """Legacy alias: all allowlist checks live in site_transport."""
+    return transport.allowed(url)
 
 
 def _fetch(url: str, accept: str = "text/html,*/*") -> str:
-    """Execute a fixed, non-shell curl invocation; do not follow redirects."""
-    url = _allowed(url)
-    refresh = _REFRESH.get()
-    headers_file = tempfile.TemporaryFile() if refresh else None
-    extra = []
-    if refresh:
-        url += ("&" if "?" in url else "?") + "_mcp_refresh=" + uuid.uuid4().hex
-        extra = ["-H", "Cache-Control: no-cache, no-store, max-age=0",
-                 "-H", "Pragma: no-cache", "-D", "/dev/fd/" + str(headers_file.fileno())]
-    try:
-        result = subprocess.run(
-            [
-                "curl", "-fsS", "--compressed",
-                "--proto", "=https", "--connect-timeout", "8",
-                "--max-time", "20", "--max-filesize", str(MAX_SOURCE_BYTES),
-                "-A", USER_AGENT,
-                "-H", "Accept: " + accept,
-                "-H", "Referer: " + ROOT,
-                "-w", "\n%{http_code}",
-                *extra, url,
-            ],
-            capture_output=True,
-            timeout=23,
-            check=False,
-            **({"pass_fds": (headers_file.fileno(),)} if refresh else {}),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError("Cererea către site a eșuat sau a expirat") from exc
-    finally:
-        if headers_file is not None:
-            headers_file.seek(0)
-            raw_headers = headers_file.read().decode("iso-8859-1")
-            headers_file.close()
-            headers = {}
-            for line in raw_headers.splitlines():
-                if line.startswith("HTTP/"):
-                    headers = {}
-                elif ":" in line:
-                    key, value = line.split(":", 1)
-                    headers[key.lower()] = value.strip()
-            observed = {k: v for k, v in headers.items() if k in (
-                "age", "cf-cache-status", "x-cache", "x-cache-status",
-                "x-litespeed-cache", "x-proxy-cache", "cache-control", "via")}
-            hit = any("hit" in v.lower() or "stale" in v.lower()
-                      for k, v in observed.items() if k not in ("cache-control", "via"))
-            hit = hit or (headers.get("age", "").isdigit() and int(headers["age"]) > 0)
-            evidence = _EVIDENCE.get()
-            if evidence is not None:
-                evidence.append({"url": url.split("_mcp_refresh=")[0].rstrip("?&"),
-                                 "headers": observed, "cache_hit": hit})
-    if result.returncode:
-        detail = result.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError("curl a eșuat: " + (detail[:250] or str(result.returncode)))
-    body, separator, status = result.stdout.rpartition(b"\n")
-    if not separator or status.strip() != b"200":
-        raise RuntimeError("Răspuns HTTP neașteptat (nu urmărim redirecturi): " +
-                           status.decode("ascii", errors="replace")[:20])
-    if len(body) > MAX_SOURCE_BYTES:
-        raise RuntimeError("Răspuns prea mare")
-    return body.decode("utf-8-sig", errors="replace")
+    """Legacy injection seam for catalog and inspector tests."""
+    return transport.fetch(url, accept)
 
 
 def _sitemaps() -> list[str]:
@@ -214,44 +143,21 @@ def _urls(sitemap_url: str) -> list[str]:
 
 
 def _slug(url: str) -> str:
-    return urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+    return wordpress.slug(url)
 
 
 def _api_item(kind: str, url: str) -> dict | None:
-    endpoint = ROOT + "wp-json/wp/v2/" + kind + "?slug=" + quote(_slug(url), safe="")
-    payload = json.loads(_fetch(endpoint, "application/json"))
-    if not isinstance(payload, list):
-        raise RuntimeError("Răspuns REST API invalid")
-    if payload and _EXACT_URL.get() and payload[0].get("link") != url:
-        raise ValueError("URL-ul REST nu corespunde exact URL-ului observației")
-    return payload[0] if payload else None
+    """Legacy API lookup, using the shared request context and transport."""
+    return wordpress.api_item(
+        kind, url, fetch=_fetch, exact_url=_EXACT_URL.get(),
+    )
 
 
 def _read_page(url: str) -> dict:
-    url = _allowed(url)
-    path = urlsplit(url).path
-    if path.startswith("/cursuri/") and _slug(url) != "cursuri":
-        item = _api_item("cursuri", url)
-        if item is None:
-            raise ValueError("Cursul nu există în REST API")
-        return {
-            "url": url, "format": "acf_json", "id": item.get("id"),
-            "title": item.get("title", {}).get("rendered", ""),
-            "link": item.get("link", url), "acf": item.get("acf"),
-        }
-
-    if re.fullmatch(r"/\d{4}/\d{2}/\d{2}/[^/]+/?", path):
-        item = _api_item("posts", url)
-        if item is not None:
-            html = item.get("content", {}).get("rendered", "")
-            if html and html.strip():
-                return {
-                    "url": url, "format": "post_html", "id": item.get("id"),
-                    "title": item.get("title", {}).get("rendered", ""),
-                    "html": html,
-                }
-
-    return {"url": url, "format": "page_html", "html": _clean_html(_fetch(url))}
+    """Legacy reader: the WordPress module owns HTML/REST page resolution."""
+    return wordpress.read_page(
+        url, allowed=_allowed, api_item=_api_item, fetch=_fetch,
+    )
 
 
 BATCH_MAX_PAGES = 10
