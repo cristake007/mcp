@@ -642,6 +642,323 @@ def _verify_findings(findings, selectors, force_refresh):
                     "din get(view='text'). Pozițiile sunt caractere Unicode, cu end exclusiv."}
 
 
+# Independent operation handlers keep the MCP entrypoint focused on input
+# validation and routing. The legacy action interface remains compatible.
+
+def _inspect_verify_quote(url, field, quote):
+    """Implementation of the verify_quote site-inspection operation."""
+    action = "verify_quote"
+    if not url:
+        raise ValueError("verify_quote necesită url")
+    field_selector = normalize_fields([field])
+    if not isinstance(quote, str) or not 1 <= len(quote) <= 500:
+        raise ValueError("quote trebuie să conțină 1..500 caractere")
+    data = _read_page(url)
+    text, warnings, spans, missing = extract_with_sources(data, field_selector)
+    total_matches, matches = _quote_matches(text, spans, quote, cap=20)
+    return {
+        "action": action, "url": url, "field": field_selector[0],
+        "quote": quote, "verified": total_matches > 0,
+        "occurrences": total_matches, "matches": matches,
+        "warnings": warnings, "missing_fields": missing,
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "note": "Potrivire exactă în textul vizibil normalizat al câmpului; "
+                "nu confirmă corectitudinea propunerii lingvistice.",
+    }
+
+
+def _inspect_audit_ack(url, expected_hash, reviews, selectors):
+    """Implementation of the audit_ack site-inspection operation."""
+    action = "audit_ack"
+    from app.site_audit import save_reviews
+    entries = reviews if reviews is not None else [{"url": url, "sha256": expected_hash}]
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 10:
+        raise ValueError("audit_ack necesită 1..10 înregistrări")
+    saved = []
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"url", "sha256"}:
+            raise ValueError("Fiecare review necesită numai url și sha256")
+        item_url, checksum = entry["url"], entry["sha256"]
+        _allowed(item_url)
+        if item_url in seen:
+            raise ValueError("URL duplicat în audit_ack")
+        seen.add(item_url)
+        if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum):
+            raise ValueError("SHA-256 invalid în audit_ack")
+        data = _read_page(item_url)
+        content, warnings, _, missing = extract_with_sources(data, selectors)
+        if warnings or missing:
+            raise ValueError("Nu se poate confirma conținut incomplet: " + item_url)
+        current = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if current != checksum:
+            raise ValueError("Conținutul s-a schimbat: " + item_url)
+        saved.append((item_url, current))
+    # This is the only operation that marks a page as reviewed.
+    save_reviews(saved, selectors)
+    return {
+        "action": action, "reviewed": len(saved),
+        "fields": list(selectors) if selectors is not None else None,
+        "coverage": "selected" if selectors is not None else "all",
+        "urls": [item_url for item_url, _ in saved],
+        "note": "Confirmare explicită; nu reprezintă validare gramaticală automată.",
+    }
+
+
+def _inspect_audit_report(sitemap, selectors, offset, limit):
+    """Implementation of the audit_report site-inspection operation."""
+    action = "audit_report"
+    if not sitemap or sitemap == "all":
+        raise ValueError("audit_report necesită un singur sitemap explicit")
+    from app.site_audit import review_coverage
+    selected = _sitemap_url(sitemap, _sitemaps())
+    urls = _urls(selected)
+    eligible, skipped = _index_pages_in_sitemap(selected, urls)
+    report = review_coverage(eligible, selectors, offset, limit)
+    return {
+        "action": action, "sitemap": selected, "total_urls": len(urls),
+        "skipped_index_urls": skipped,
+        "fields": list(selectors) if selectors is not None else None,
+        "coverage": "selected" if selectors is not None else "all",
+        **report,
+    }
+
+
+def _inspect_urls(sitemap, domain, offset, limit):
+    """Implementation of the urls site-inspection operation."""
+    action = "urls"
+    selected_domain = None
+    if domain is not None:
+        from app.course_catalog import COURSE_SITEMAP, domain_urls
+        if sitemap and sitemap not in (COURSE_SITEMAP, "cursuri-sitemap.xml"):
+            raise ValueError("domain poate fi folosit doar cu sitemapul cursurilor")
+        selected_domain, urls = domain_urls(domain)
+        selected = COURSE_SITEMAP
+    else:
+        selected = _sitemap_url(sitemap, _sitemaps())
+        urls = _urls(selected)
+    subset = urls[offset:offset + limit]
+    next_offset = offset + len(subset)
+    response = {
+        "action": action, "sitemap": selected, "total": len(urls),
+        "offset": offset, "urls": subset,
+        "next_offset": next_offset if next_offset < len(urls) else None,
+    }
+    if selected_domain is not None:
+        response["domain"] = selected_domain
+    return response
+
+
+def _inspect_get(url, view, selectors, part, max_chars, expected_hash, force_refresh):
+    """Implementation of the get site-inspection operation."""
+    action = "get"
+    if not url:
+        raise ValueError("Precizează url")
+    data, metadata = _load_page(url, force_refresh)
+    if view == "text":
+        text, warnings, spans, missing = extract_with_sources(data, selectors)
+        chunks = _page_chunks(text, part, max_chars, expected_hash)
+        return {
+            "action": action, **metadata, "url": url, "view": view,
+            "format": data["format"], "warnings": warnings,
+            "missing_fields": missing,
+            "fields": list(selectors) if selectors is not None else None,
+            "coverage": "selected" if selectors is not None else "all",
+            "source_map": slice_sources(spans, part, max_chars, len(chunks["content"])),
+            **chunks,
+        }
+    if selectors is not None:
+        raise ValueError("fields se folosește numai cu view='text' sau batch_get")
+    if data["format"] == "acf_json":
+        payload = json.dumps(data, ensure_ascii=False)
+        chunks = _page_chunks(payload, part, max_chars, expected_hash)
+        if chunks["total_parts"] == 1:
+            return {
+                "action": action, **data, **metadata, "content_complete": True,
+                "total_chars": chunks["total_chars"], "total_parts": 1,
+                "part": 0, "sha256": chunks["sha256"],
+            }
+        return {
+            "action": action, **metadata, "url": url, "format": "acf_json",
+            "encoding": "json", "fragment": chunks["content"],
+            **{k: v for k, v in chunks.items() if k != "content"},
+        }
+    chunks = _page_chunks(data["html"], part, max_chars, expected_hash)
+    return {
+        "action": action, **metadata, **{k: v for k, v in data.items() if k != "html"},
+        "html": chunks["content"],
+        **{k: v for k, v in chunks.items() if k != "content"},
+        "truncated": chunks["next_part"] is not None,
+    }
+
+
+def _inspect_batch(action, sitemap, domain, offset, limit, max_chars, selectors, force_refresh):
+    """Implementation of the batch site-inspection operation."""
+    selected_domain = None
+    if domain is not None:
+        from app.course_catalog import COURSE_SITEMAP, domain_urls
+        if sitemap and sitemap not in (COURSE_SITEMAP, "cursuri-sitemap.xml"):
+            raise ValueError("domain poate fi folosit doar cu sitemapul cursurilor")
+        selected_domain, eligible_urls = domain_urls(domain)
+        selected = COURSE_SITEMAP
+        urls = eligible_urls
+        skipped_index_urls = []
+        # Domain batches are handled by the server, not manually by the LLM.
+        # A bounded 100-course response avoids unbounded output payloads.
+        batch_limit = min(max(0, len(eligible_urls) - offset), 100)
+        chars_per_page = max_chars
+    else:
+        if not sitemap or sitemap == "all":
+            raise ValueError(action + " necesită un singur sitemap explicit")
+        selected = _sitemap_url(sitemap, _sitemaps())
+        urls = _urls(selected)
+        eligible_urls, skipped_index_urls = _index_pages_in_sitemap(selected, urls)
+        batch_limit = min(limit, BATCH_MAX_PAGES)
+        chars_per_page = min(max_chars, BATCH_CHARS_PER_PAGE)
+    current = eligible_urls[offset:offset + batch_limit]
+    if action == "audit_changes":
+        from app.site_audit import get_reviews
+        baselines = get_reviews(current, selectors)
+    else:
+        baselines = {}
+    pages = []
+    unchanged = []
+    errors = []
+    with ThreadPoolExecutor(max_workers=min(BATCH_WORKERS, max(1, len(current)))) as pool:
+        futures = [pool.submit(_batch_page, item, chars_per_page, selectors, force_refresh) for item in current]
+        for item, future in zip(current, futures):
+            try:
+                page = future.result()
+                old = baselines.get(item)
+                if (old is not None and old["sha256"] == page["sha256"]
+                        and not page["warnings"] and not page["missing_fields"]):
+                    unchanged.append({
+                        "url": item, "sha256": page["sha256"],
+                        "reviewed_at": old["reviewed_at"],
+                    })
+                else:
+                    if action == "audit_changes":
+                        page["change_status"] = "new" if old is None else "changed"
+                    pages.append(page)
+            except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+                errors.append({"url": item, "error": str(exc)[:300]})
+    next_offset = offset + len(current)
+    pending = [
+        {"url": p["url"], "retrieve_remaining": p["retrieve_remaining"]}
+        for p in pages if p["next_part"] is not None
+    ]
+    from app.site_audit import batch_coverage
+    coverage_report = batch_coverage(pages, unchanged, errors, len(current))
+    return {
+        "action": action, "sitemap": selected, "total_urls": len(urls),
+        **({"domain": selected_domain} if selected_domain is not None else {}),
+        "auditable_urls": len(eligible_urls),
+        "skipped_index_urls": skipped_index_urls,
+        "fields": list(selectors) if selectors is not None else None,
+        "coverage": "selected" if selectors is not None else "all",
+        "offset": offset, "requested_limit": batch_limit if domain is not None else limit,
+        "processed": len(current), "pages": pages, "unchanged": unchanged,
+        "errors": errors,
+        "coverage_report": coverage_report,
+        "next_offset": next_offset if next_offset < len(eligible_urls) else None,
+        "end_of_sitemap": next_offset >= len(eligible_urls),
+        "batch_complete": not errors and not pending
+                          and all(not p["warnings"] and not p["missing_fields"]
+                                  for p in pages),
+        "pending_parts": pending,
+        "note": (
+            "end_of_sitemap describes URL pagination only. "
+            "Do not claim an exhaustive audit until all batches, errors "
+            "and pending parts have been reviewed. HTML is not JS-rendered. "
+            "A selected domain is the complete WordPress taxonomy selection, "
+            "subject to 100-course response pagination. "
+            "Only audit_ack explicitly marks pages reviewed; unchanged "
+            "means unchanged since that exact field selection was approved."
+        ),
+    }
+
+
+def _inspect_search_many(queries, match_mode, sitemap, offset, limit):
+    """Implementation of the search_many site-inspection operation."""
+    action = "search_many"
+    if not isinstance(queries, list) or not 1 <= len(queries) <= 10:
+        raise ValueError("search_many necesită queries cu 1..10 termeni")
+    if match_mode not in ("exact", "whole_word", "accent_insensitive"):
+        raise ValueError("match_mode: exact, whole_word sau accent_insensitive")
+    seen_terms = set()
+    for term in queries:
+        if not isinstance(term, str) or not 1 <= len(term.strip()) <= 120:
+            raise ValueError("Fiecare termen trebuie să conțină 1..120 caractere")
+        normalized = term.casefold()
+        if normalized in seen_terms:
+            raise ValueError("Termeni duplicați în queries")
+        seen_terms.add(normalized)
+        if match_mode == "accent_insensitive" and not _accent_fold_with_positions(term)[0].strip():
+            raise ValueError("Termenul nu conține caractere căutabile")
+    entries = _search_entries(sitemap)
+    batch = entries[offset:offset + min(limit, 20)]
+    matches, errors = [], []
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(contextvars.copy_context().run, _search_many_one, item, queries, match_mode) for item in batch]
+        for item, future in zip(batch, futures):
+            try:
+                result = future.result()
+                if result:
+                    matches.append(result)
+            except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
+                errors.append({"url": item[0], "error": str(exc)[:200]})
+    totals = {
+        term: {"query": term, "matching_urls": 0, "occurrences": 0}
+        for term in queries
+    }
+    for result in matches:
+        for match in result["terms"]:
+            summary = totals[match["query"]]
+            summary["matching_urls"] += 1
+            summary["occurrences"] += match["occurrences"]
+    next_offset = offset + len(batch)
+    next_offset = next_offset if next_offset < len(entries) else None
+    return {
+        "action": action, "queries": queries, "match_mode": match_mode,
+        "sitemap": sitemap or "all", "total_urls": len(entries),
+        "scanned": len(batch), "offset": offset, "next_offset": next_offset,
+        "complete": next_offset is None and not errors,
+        "matches": matches, "query_totals": list(totals.values()),
+        "totals_scope": "current_batch", "errors": errors,
+        "note": "Continue next_offset and inspect errors for full coverage. "
+                "Results are literal text matches, not linguistic conclusions.",
+    }
+
+
+def _inspect_search(query, sitemap, offset, limit):
+    """Implementation of the search site-inspection operation."""
+    action = "search"
+    if not query or not query.strip() or len(query) > 200:
+        raise ValueError("query trebuie să conțină între 1 și 200 de caractere")
+    entries = _search_entries(sitemap)
+    scan_count = min(limit, 20)
+    batch = entries[offset:offset + scan_count]
+    matches = []
+    errors = []
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(contextvars.copy_context().run, _search_one, item, query) for item in batch]
+        for item, future in zip(batch, futures):
+            try:
+                match = future.result()
+                if match:
+                    matches.append(match)
+            except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
+                errors.append({"url": item[0], "error": str(exc)[:200]})
+    nxt = offset + len(batch)
+    next_offset = nxt if nxt < len(entries) else None
+    return {
+        "action": action, "query": query, "sitemap": sitemap or "all",
+        "total_urls": len(entries), "scanned": len(batch), "offset": offset,
+        "next_offset": next_offset,
+        "complete": next_offset is None and not errors,
+        "matches": matches, "errors": errors,
+    }
+
 @_refresh_scope
 def inspect_site(
     action: str,
@@ -805,295 +1122,27 @@ def inspect_site(
         return _verify_findings(findings, selectors, force_refresh)
 
     if action == "verify_quote":
-        if not url:
-            raise ValueError("verify_quote necesită url")
-        field_selector = normalize_fields([field])
-        if not isinstance(quote, str) or not 1 <= len(quote) <= 500:
-            raise ValueError("quote trebuie să conțină 1..500 caractere")
-        data = _read_page(url)
-        text, warnings, spans, missing = extract_with_sources(data, field_selector)
-        total_matches, matches = _quote_matches(text, spans, quote, cap=20)
-        return {
-            "action": action, "url": url, "field": field_selector[0],
-            "quote": quote, "verified": total_matches > 0,
-            "occurrences": total_matches, "matches": matches,
-            "warnings": warnings, "missing_fields": missing,
-            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            "note": "Potrivire exactă în textul vizibil normalizat al câmpului; "
-                    "nu confirmă corectitudinea propunerii lingvistice.",
-        }
+        return _inspect_verify_quote(url, field, quote)
 
     if action == "audit_ack":
-        from app.site_audit import save_reviews
-        entries = reviews if reviews is not None else [{"url": url, "sha256": expected_hash}]
-        if not isinstance(entries, list) or not 1 <= len(entries) <= 10:
-            raise ValueError("audit_ack necesită 1..10 înregistrări")
-        saved = []
-        seen = set()
-        for entry in entries:
-            if not isinstance(entry, dict) or set(entry) != {"url", "sha256"}:
-                raise ValueError("Fiecare review necesită numai url și sha256")
-            item_url, checksum = entry["url"], entry["sha256"]
-            _allowed(item_url)
-            if item_url in seen:
-                raise ValueError("URL duplicat în audit_ack")
-            seen.add(item_url)
-            if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum):
-                raise ValueError("SHA-256 invalid în audit_ack")
-            data = _read_page(item_url)
-            content, warnings, _, missing = extract_with_sources(data, selectors)
-            if warnings or missing:
-                raise ValueError("Nu se poate confirma conținut incomplet: " + item_url)
-            current = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            if current != checksum:
-                raise ValueError("Conținutul s-a schimbat: " + item_url)
-            saved.append((item_url, current))
-        # This is the only operation that marks a page as reviewed.
-        save_reviews(saved, selectors)
-        return {
-            "action": action, "reviewed": len(saved),
-            "fields": list(selectors) if selectors is not None else None,
-            "coverage": "selected" if selectors is not None else "all",
-            "urls": [item_url for item_url, _ in saved],
-            "note": "Confirmare explicită; nu reprezintă validare gramaticală automată.",
-        }
+        return _inspect_audit_ack(url, expected_hash, reviews, selectors)
 
     if action == "sitemaps":
         return {"action": action, "sitemaps": _sitemaps()}
 
     if action == "audit_report":
-        if not sitemap or sitemap == "all":
-            raise ValueError("audit_report necesită un singur sitemap explicit")
-        from app.site_audit import review_coverage
-        selected = _sitemap_url(sitemap, _sitemaps())
-        urls = _urls(selected)
-        eligible, skipped = _index_pages_in_sitemap(selected, urls)
-        report = review_coverage(eligible, selectors, offset, limit)
-        return {
-            "action": action, "sitemap": selected, "total_urls": len(urls),
-            "skipped_index_urls": skipped,
-            "fields": list(selectors) if selectors is not None else None,
-            "coverage": "selected" if selectors is not None else "all",
-            **report,
-        }
+        return _inspect_audit_report(sitemap, selectors, offset, limit)
 
     if action == "urls":
-        selected_domain = None
-        if domain is not None:
-            from app.course_catalog import COURSE_SITEMAP, domain_urls
-            if sitemap and sitemap not in (COURSE_SITEMAP, "cursuri-sitemap.xml"):
-                raise ValueError("domain poate fi folosit doar cu sitemapul cursurilor")
-            selected_domain, urls = domain_urls(domain)
-            selected = COURSE_SITEMAP
-        else:
-            selected = _sitemap_url(sitemap, _sitemaps())
-            urls = _urls(selected)
-        subset = urls[offset:offset + limit]
-        next_offset = offset + len(subset)
-        response = {
-            "action": action, "sitemap": selected, "total": len(urls),
-            "offset": offset, "urls": subset,
-            "next_offset": next_offset if next_offset < len(urls) else None,
-        }
-        if selected_domain is not None:
-            response["domain"] = selected_domain
-        return response
+        return _inspect_urls(sitemap, domain, offset, limit)
 
     if action == "get":
-        if not url:
-            raise ValueError("Precizează url")
-        data, metadata = _load_page(url, force_refresh)
-        if view == "text":
-            text, warnings, spans, missing = extract_with_sources(data, selectors)
-            chunks = _page_chunks(text, part, max_chars, expected_hash)
-            return {
-                "action": action, **metadata, "url": url, "view": view,
-                "format": data["format"], "warnings": warnings,
-                "missing_fields": missing,
-                "fields": list(selectors) if selectors is not None else None,
-                "coverage": "selected" if selectors is not None else "all",
-                "source_map": slice_sources(spans, part, max_chars, len(chunks["content"])),
-                **chunks,
-            }
-        if selectors is not None:
-            raise ValueError("fields se folosește numai cu view='text' sau batch_get")
-        if data["format"] == "acf_json":
-            payload = json.dumps(data, ensure_ascii=False)
-            chunks = _page_chunks(payload, part, max_chars, expected_hash)
-            if chunks["total_parts"] == 1:
-                return {
-                    "action": action, **data, **metadata, "content_complete": True,
-                    "total_chars": chunks["total_chars"], "total_parts": 1,
-                    "part": 0, "sha256": chunks["sha256"],
-                }
-            return {
-                "action": action, **metadata, "url": url, "format": "acf_json",
-                "encoding": "json", "fragment": chunks["content"],
-                **{k: v for k, v in chunks.items() if k != "content"},
-            }
-        chunks = _page_chunks(data["html"], part, max_chars, expected_hash)
-        return {
-            "action": action, **metadata, **{k: v for k, v in data.items() if k != "html"},
-            "html": chunks["content"],
-            **{k: v for k, v in chunks.items() if k != "content"},
-            "truncated": chunks["next_part"] is not None,
-        }
+        return _inspect_get(url, view, selectors, part, max_chars, expected_hash, force_refresh)
 
     if action in ("batch_get", "audit_changes"):
-        selected_domain = None
-        if domain is not None:
-            from app.course_catalog import COURSE_SITEMAP, domain_urls
-            if sitemap and sitemap not in (COURSE_SITEMAP, "cursuri-sitemap.xml"):
-                raise ValueError("domain poate fi folosit doar cu sitemapul cursurilor")
-            selected_domain, eligible_urls = domain_urls(domain)
-            selected = COURSE_SITEMAP
-            urls = eligible_urls
-            skipped_index_urls = []
-            # Domain batches are handled by the server, not manually by the LLM.
-            # A bounded 100-course response avoids unbounded output payloads.
-            batch_limit = min(max(0, len(eligible_urls) - offset), 100)
-            chars_per_page = max_chars
-        else:
-            if not sitemap or sitemap == "all":
-                raise ValueError(action + " necesită un singur sitemap explicit")
-            selected = _sitemap_url(sitemap, _sitemaps())
-            urls = _urls(selected)
-            eligible_urls, skipped_index_urls = _index_pages_in_sitemap(selected, urls)
-            batch_limit = min(limit, BATCH_MAX_PAGES)
-            chars_per_page = min(max_chars, BATCH_CHARS_PER_PAGE)
-        current = eligible_urls[offset:offset + batch_limit]
-        if action == "audit_changes":
-            from app.site_audit import get_reviews
-            baselines = get_reviews(current, selectors)
-        else:
-            baselines = {}
-        pages = []
-        unchanged = []
-        errors = []
-        with ThreadPoolExecutor(max_workers=min(BATCH_WORKERS, max(1, len(current)))) as pool:
-            futures = [pool.submit(_batch_page, item, chars_per_page, selectors, force_refresh) for item in current]
-            for item, future in zip(current, futures):
-                try:
-                    page = future.result()
-                    old = baselines.get(item)
-                    if (old is not None and old["sha256"] == page["sha256"]
-                            and not page["warnings"] and not page["missing_fields"]):
-                        unchanged.append({
-                            "url": item, "sha256": page["sha256"],
-                            "reviewed_at": old["reviewed_at"],
-                        })
-                    else:
-                        if action == "audit_changes":
-                            page["change_status"] = "new" if old is None else "changed"
-                        pages.append(page)
-                except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
-                    errors.append({"url": item, "error": str(exc)[:300]})
-        next_offset = offset + len(current)
-        pending = [
-            {"url": p["url"], "retrieve_remaining": p["retrieve_remaining"]}
-            for p in pages if p["next_part"] is not None
-        ]
-        from app.site_audit import batch_coverage
-        coverage_report = batch_coverage(pages, unchanged, errors, len(current))
-        return {
-            "action": action, "sitemap": selected, "total_urls": len(urls),
-            **({"domain": selected_domain} if selected_domain is not None else {}),
-            "auditable_urls": len(eligible_urls),
-            "skipped_index_urls": skipped_index_urls,
-            "fields": list(selectors) if selectors is not None else None,
-            "coverage": "selected" if selectors is not None else "all",
-            "offset": offset, "requested_limit": batch_limit if domain is not None else limit,
-            "processed": len(current), "pages": pages, "unchanged": unchanged,
-            "errors": errors,
-            "coverage_report": coverage_report,
-            "next_offset": next_offset if next_offset < len(eligible_urls) else None,
-            "end_of_sitemap": next_offset >= len(eligible_urls),
-            "batch_complete": not errors and not pending
-                              and all(not p["warnings"] and not p["missing_fields"]
-                                      for p in pages),
-            "pending_parts": pending,
-            "note": (
-                "end_of_sitemap describes URL pagination only. "
-                "Do not claim an exhaustive audit until all batches, errors "
-                "and pending parts have been reviewed. HTML is not JS-rendered. "
-                "A selected domain is the complete WordPress taxonomy selection, "
-                "subject to 100-course response pagination. "
-                "Only audit_ack explicitly marks pages reviewed; unchanged "
-                "means unchanged since that exact field selection was approved."
-            ),
-        }
+        return _inspect_batch(action, sitemap, domain, offset, limit, max_chars, selectors, force_refresh)
 
     if action == "search_many":
-        if not isinstance(queries, list) or not 1 <= len(queries) <= 10:
-            raise ValueError("search_many necesită queries cu 1..10 termeni")
-        if match_mode not in ("exact", "whole_word", "accent_insensitive"):
-            raise ValueError("match_mode: exact, whole_word sau accent_insensitive")
-        seen_terms = set()
-        for term in queries:
-            if not isinstance(term, str) or not 1 <= len(term.strip()) <= 120:
-                raise ValueError("Fiecare termen trebuie să conțină 1..120 caractere")
-            normalized = term.casefold()
-            if normalized in seen_terms:
-                raise ValueError("Termeni duplicați în queries")
-            seen_terms.add(normalized)
-            if match_mode == "accent_insensitive" and not _accent_fold_with_positions(term)[0].strip():
-                raise ValueError("Termenul nu conține caractere căutabile")
-        entries = _search_entries(sitemap)
-        batch = entries[offset:offset + min(limit, 20)]
-        matches, errors = [], []
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            futures = [pool.submit(contextvars.copy_context().run, _search_many_one, item, queries, match_mode) for item in batch]
-            for item, future in zip(batch, futures):
-                try:
-                    result = future.result()
-                    if result:
-                        matches.append(result)
-                except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
-                    errors.append({"url": item[0], "error": str(exc)[:200]})
-        totals = {
-            term: {"query": term, "matching_urls": 0, "occurrences": 0}
-            for term in queries
-        }
-        for result in matches:
-            for match in result["terms"]:
-                summary = totals[match["query"]]
-                summary["matching_urls"] += 1
-                summary["occurrences"] += match["occurrences"]
-        next_offset = offset + len(batch)
-        next_offset = next_offset if next_offset < len(entries) else None
-        return {
-            "action": action, "queries": queries, "match_mode": match_mode,
-            "sitemap": sitemap or "all", "total_urls": len(entries),
-            "scanned": len(batch), "offset": offset, "next_offset": next_offset,
-            "complete": next_offset is None and not errors,
-            "matches": matches, "query_totals": list(totals.values()),
-            "totals_scope": "current_batch", "errors": errors,
-            "note": "Continue next_offset and inspect errors for full coverage. "
-                    "Results are literal text matches, not linguistic conclusions.",
-        }
+        return _inspect_search_many(queries, match_mode, sitemap, offset, limit)
 
-    if not query or not query.strip() or len(query) > 200:
-        raise ValueError("query trebuie să conțină între 1 și 200 de caractere")
-    entries = _search_entries(sitemap)
-    scan_count = min(limit, 20)
-    batch = entries[offset:offset + scan_count]
-    matches = []
-    errors = []
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(contextvars.copy_context().run, _search_one, item, query) for item in batch]
-        for item, future in zip(batch, futures):
-            try:
-                match = future.result()
-                if match:
-                    matches.append(match)
-            except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
-                errors.append({"url": item[0], "error": str(exc)[:200]})
-    nxt = offset + len(batch)
-    next_offset = nxt if nxt < len(entries) else None
-    return {
-        "action": action, "query": query, "sitemap": sitemap or "all",
-        "total_urls": len(entries), "scanned": len(batch), "offset": offset,
-        "next_offset": next_offset,
-        "complete": next_offset is None and not errors,
-        "matches": matches, "errors": errors,
-    }
+    return _inspect_search(query, sitemap, offset, limit)
