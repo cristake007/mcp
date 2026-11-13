@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from app import site_transport as transport, site_wordpress as wordpress
 from app import site_client as client
+from app import site_content_service as content_service
 from app import site_sitemap_reader as sitemap_reader
 from app.site_output import SiteInspectionResult
 from app.site_sitemaps import (
@@ -192,16 +193,11 @@ def _search_many_one(
 
 
 def _search_entries(sitemap: str) -> list[tuple[str, str]]:
-    known = _sitemaps()
-    selected = known if not sitemap or sitemap == "all" else [_sitemap_url(sitemap, known)]
-    entries = []
-    seen = set()
-    for item in selected:
-        for url in _urls(item):
-            if url not in seen:
-                entries.append((url, item))
-                seen.add(url)
-    return entries
+    """Legacy adapter to the read-only content service."""
+    return content_service.search_entries(
+        sitemap, known_sitemaps=_sitemaps, select_sitemap=_sitemap_url,
+        sitemap_urls=_urls,
+    )
 
 
 def _quote_matches(text, spans, quote, cap=None):
@@ -247,70 +243,26 @@ def _inspect_audit_report(sitemap, selectors, offset, limit):
 
 
 def _inspect_urls(sitemap, domain, offset, limit):
-    """Implementation of the urls site-inspection operation."""
-    action = "urls"
-    selected_domain = None
-    if domain is not None:
-        from app.course_catalog import COURSE_SITEMAP, domain_urls
-        if sitemap and sitemap not in (COURSE_SITEMAP, "cursuri-sitemap.xml"):
-            raise ValueError("domain poate fi folosit doar cu sitemapul cursurilor")
-        selected_domain, urls = domain_urls(domain)
-        selected = COURSE_SITEMAP
-    else:
-        selected = _sitemap_url(sitemap, _sitemaps())
-        urls = _urls(selected)
-    subset = urls[offset:offset + limit]
-    next_offset = offset + len(subset)
-    response = {
-        "action": action, "sitemap": selected, "total": len(urls),
-        "offset": offset, "urls": subset,
-        "next_offset": next_offset if next_offset < len(urls) else None,
+    """Legacy URL operation, routed through the shared content service."""
+    from app.course_catalog import domain_urls
+    return {
+        "action": "urls",
+        **content_service.list_urls(
+            sitemap, domain, offset, limit, known_sitemaps=_sitemaps,
+            select_sitemap=_sitemap_url, sitemap_urls=_urls,
+            domain_urls=domain_urls,
+        ),
     }
-    if selected_domain is not None:
-        response["domain"] = selected_domain
-    return response
 
 
 def _inspect_get(url, view, selectors, part, max_chars, expected_hash, force_refresh):
-    """Implementation of the get site-inspection operation."""
-    action = "get"
-    if not url:
-        raise ValueError("Precizează url")
-    data, metadata = _load_page(url, force_refresh)
-    if view == "text":
-        text, warnings, spans, missing = extract_with_sources(data, selectors)
-        chunks = _page_chunks(text, part, max_chars, expected_hash)
-        return {
-            "action": action, **metadata, "url": url, "view": view,
-            "format": data["format"], "warnings": warnings,
-            "missing_fields": missing,
-            "fields": list(selectors) if selectors is not None else None,
-            "coverage": "selected" if selectors is not None else "all",
-            "source_map": slice_sources(spans, part, max_chars, len(chunks["content"])),
-            **chunks,
-        }
-    if selectors is not None:
-        raise ValueError("fields se folosește numai cu view='text' sau batch_get")
-    if data["format"] == "acf_json":
-        payload = json.dumps(data, ensure_ascii=False)
-        chunks = _page_chunks(payload, part, max_chars, expected_hash)
-        if chunks["total_parts"] == 1:
-            return {
-                "action": action, **data, **metadata, "content_complete": True,
-                "total_chars": chunks["total_chars"], "total_parts": 1,
-                "part": 0, "sha256": chunks["sha256"],
-            }
-        return {
-            "action": action, **metadata, "url": url, "format": "acf_json",
-            "encoding": "json", "fragment": chunks["content"],
-            **{k: v for k, v in chunks.items() if k != "content"},
-        }
-    chunks = _page_chunks(data["html"], part, max_chars, expected_hash)
+    """Legacy page extraction, routed through the shared content service."""
     return {
-        "action": action, **metadata, **{k: v for k, v in data.items() if k != "html"},
-        "html": chunks["content"],
-        **{k: v for k, v in chunks.items() if k != "content"},
-        "truncated": chunks["next_part"] is not None,
+        "action": "get",
+        **content_service.get_page(
+            url, view, selectors, part, max_chars, expected_hash,
+            force_refresh, load_page=_load_page,
+        ),
     }
 
 
