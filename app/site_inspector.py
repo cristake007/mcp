@@ -15,15 +15,15 @@ import re
 import subprocess
 import threading
 import time
-import unicodedata
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
-from bs4.element import Comment, NavigableString, Tag
 from urllib.parse import quote, urlsplit
 
 from bs4 import BeautifulSoup
 
 from app.site_output import SiteInspectionResult
+from app.html_text import visible_text as _visible_text
+from app.site_fields import normalize_fields, extract_with_sources, slice_sources
 from app.text_matching import TextMatcher, accent_fold_with_positions
 
 ROOT = "https://tuvkarpat.ro/"
@@ -323,53 +323,9 @@ def _as_search_text(data: dict) -> str:
 
 
 
-# Preserve text from all ACF source fields and unknown Elementor elements.
-# Structural separators retain context from headings, lists and table cells.
-BLOCK_TAGS = {
-    "article", "aside", "blockquote", "dd", "details", "div", "dl", "dt",
-    "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
-    "h5", "h6", "header", "hr", "li", "main", "ol", "p", "pre",
-    "section", "summary", "table", "tbody", "tfoot", "thead", "tr", "ul",
-}
 BATCH_MAX_PAGES = 10
 BATCH_WORKERS = 4
 BATCH_CHARS_PER_PAGE = 12000
-
-
-def _visible_text(html_or_text: str) -> str:
-    """Keep all captured text nodes, including unknown widgets and table cells.
-
-    This processes the returned HTML, not JavaScript-rendered DOM. It does not
-    attempt Romanian-language correction, filtering or candidate detection.
-    """
-    soup = BeautifulSoup(html_or_text, "html.parser")
-    for element in soup.select("script, style, meta, iframe, noscript"):
-        element.decompose()
-    pieces = []
-
-    def visit(node):
-        if isinstance(node, Comment):
-            return
-        if isinstance(node, NavigableString):
-            pieces.append(str(node))
-            return
-        if not isinstance(node, Tag):
-            return
-        if node.name in BLOCK_TAGS or node.name == "br":
-            pieces.append("\n")
-        if node.name == "img" and node.get("alt"):
-            pieces.append(" [imagine alt: " + node["alt"] + "] ")
-        for child in node.children:
-            visit(child)
-        if node.name in {"td", "th"}:
-            pieces.append("\t")
-        elif node.name in BLOCK_TAGS:
-            pieces.append("\n")
-
-    visit(soup)
-    text = "".join(pieces)
-    text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _audit_text(data: dict) -> tuple[str, list[str]]:
@@ -431,7 +387,6 @@ def _page_chunks(content: str, part: int, size: int, expected_hash: str = "") ->
 
 
 def _batch_page(url: str, chars_per_page: int, fields: tuple[str, ...] | None = None, force_refresh: bool = False) -> dict:
-    from app.site_fields import extract_with_sources, slice_sources
     data, metadata = _load_page(url, force_refresh)
     text, warnings, spans, missing = extract_with_sources(data, fields)
     chunks = _page_chunks(text, 0, chars_per_page)
@@ -541,7 +496,6 @@ def _quote_matches(text, spans, quote, cap=None):
 
 
 def _verify_findings(findings, selectors, force_refresh):
-    from app.site_fields import extract_with_sources, normalize_fields
     if not isinstance(findings, list) or not 1 <= len(findings) <= 100:
         raise ValueError("verify_findings necesită 1..100 observații")
     pages = {}
@@ -610,7 +564,6 @@ def _verify_findings(findings, selectors, force_refresh):
 
 def _inspect_verify_quote(url, field, quote):
     """Implementation of the verify_quote site-inspection operation."""
-    from app.site_fields import normalize_fields, extract_with_sources
     action = "verify_quote"
     if not url:
         raise ValueError("verify_quote necesită url")
@@ -633,7 +586,6 @@ def _inspect_verify_quote(url, field, quote):
 
 def _inspect_audit_ack(url, expected_hash, reviews, selectors):
     """Implementation of the audit_ack site-inspection operation."""
-    from app.site_fields import extract_with_sources
     action = "audit_ack"
     from app.site_audit import save_reviews
     entries = reviews if reviews is not None else [{"url": url, "sha256": expected_hash}]
@@ -716,7 +668,6 @@ def _inspect_urls(sitemap, domain, offset, limit):
 
 def _inspect_get(url, view, selectors, part, max_chars, expected_hash, force_refresh):
     """Implementation of the get site-inspection operation."""
-    from app.site_fields import extract_with_sources, slice_sources
     action = "get"
     if not url:
         raise ValueError("Precizează url")
@@ -1081,7 +1032,6 @@ def inspect_site(
         return invalid("view", view, "'raw' sau 'text'", "raw")
 
 
-    from app.site_fields import normalize_fields
     selectors = normalize_fields(fields)
 
     if action == "verify_findings":
