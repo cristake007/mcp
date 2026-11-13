@@ -10,6 +10,7 @@ TOOLS = (
     # Task-oriented catalog tools, plus the original compatibility interfaces.
     "list_domains", "list_courses", "get_course", "find_courses",
     "search_courses", "inspect_site",
+    "list_sitemaps", "list_site_urls", "get_site_text", "search_site",
     # Optional document-RAG tools.
     "search_docs", "get_text", "get_document_context", "corpus_stats",
     "list_docs", "document_status", "corpus_health", "get_page_image",
