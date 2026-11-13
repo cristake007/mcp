@@ -177,7 +177,13 @@ def search_site(
     _validate_window(offset, limit, 20)
     if type(force_refresh) is not bool:
         raise ValueError("force_refresh must be boolean")
-    result = site._inspect_search_many([query], match_mode, sitemap, offset, limit)
+    from app.site_search_service import search_many
+
+    result = search_many(
+        [query], match_mode, sitemap, offset, limit,
+        list_entries=site._search_entries,
+        inspect_one=site._search_many_one,
+    )
     return {
         "query": query,
         **{key: value for key, value in result.items() if key not in ("action", "queries", "note")},
