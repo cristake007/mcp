@@ -28,7 +28,10 @@ class SearchServiceTests(unittest.TestCase):
         self.assertEqual(result["query_totals"][0]["matching_urls"], 2)
         self.assertEqual(result["query_totals"][1]["occurrences"], 2)
         span = result["matches"][0]["terms"][0]["positions"][0]
-        source = service.as_search_text(read(URL1))
+        source = service.as_search_text({
+            "url": URL1, "format": "acf_json", "title": "Introducere",
+            "acf": {"tematica": "Țară, știință, ISO 9001"},
+        })
         self.assertEqual(source[span["start"]:span["end"]], "Țară")
         self.assertCountEqual(calls, [URL1, URL2])
 
