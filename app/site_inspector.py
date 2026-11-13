@@ -12,14 +12,12 @@ import json
 import re
 # Kept as a compatibility module reference for existing test/diagnostic code.
 import subprocess
-import threading
-import xml.etree.ElementTree as ET
-import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
 
 
 from app import site_transport as transport, site_wordpress as wordpress
+from app import site_sitemap_reader as sitemap_reader
 from app.site_output import SiteInspectionResult
 from app.site_sitemaps import (
     xml_locations as _xml_locations,
@@ -71,34 +69,16 @@ def _load_page(url, force_refresh=False, exact_url=False):
         _EXACT_URL.reset(identity)
 
 
-# Short-lived sitemap-only cache avoids two redundant requests per batch.
-# Live page/ACF data are still retrieved anew every time.
-_SITEMAP_TTL_SECONDS = 300
-_SITEMAP_CACHE = {}
-_SITEMAP_CACHE_LOCK = threading.Lock()
+# Keep legacy cache handles for callers that inspect or reset the cache.
+_SITEMAP_TTL_SECONDS = sitemap_reader.SITEMAP_TTL_SECONDS
+_SITEMAP_CACHE = sitemap_reader.SITEMAP_CACHE
+_SITEMAP_CACHE_LOCK = sitemap_reader.SITEMAP_CACHE_LOCK
 
 
 def _sitemap_xml(url: str) -> str:
-    url = _allowed(url)
-    with _SITEMAP_CACHE_LOCK:
-        cached = _SITEMAP_CACHE.get(url)
-        if not _REFRESH.get() and cached and time.monotonic() - cached[0] < _SITEMAP_TTL_SECONDS:
-            return cached[1]
-    payload = _fetch(url, "application/xml,text/xml,*/*")
-    # Never cache broken or non-sitemap HTML challenges.
-    try:
-        parsed = ET.fromstring(payload)
-        if parsed.tag.split("}")[-1] not in ("sitemapindex", "urlset"):
-            return payload
-    except ET.ParseError:
-        return payload
-    with _SITEMAP_CACHE_LOCK:
-        if len(_SITEMAP_CACHE) >= 32:
-            _SITEMAP_CACHE.clear()
-        _SITEMAP_CACHE[url] = (time.monotonic(), payload)
-    return payload
-
-
+    return sitemap_reader.sitemap_xml(
+        url, allowed=_allowed, fetch=_fetch, refresh=_REFRESH.get(),
+    )
 
 
 def _allowed(url: str) -> str:
@@ -112,34 +92,21 @@ def _fetch(url: str, accept: str = "text/html,*/*") -> str:
 
 
 def _sitemaps() -> list[str]:
-    links = _xml_locations(
-        _sitemap_xml(SITEMAP_INDEX), "sitemap"
+    return sitemap_reader.sitemaps(
+        index=SITEMAP_INDEX, xml_reader=_sitemap_xml, allowed=_allowed,
     )
-    return [_allowed(link) for link in links]
 
 
 def _sitemap_url(value: str, known: list[str]) -> str:
-    if not value:
-        raise ValueError("Precizează sitemap, de exemplu industriale-sitemap.xml")
-    candidate = value if value.startswith("https://") else ROOT + value.lstrip("/")
-    _allowed(candidate)
-    if candidate not in known:
-        raise ValueError("Sitemap-ul nu se află în indexul public")
-    return candidate
+    return sitemap_reader.sitemap_url(
+        value, known, root=ROOT, allowed=_allowed,
+    )
 
 
 def _urls(sitemap_url: str) -> list[str]:
-    links = _xml_locations(
-        _sitemap_xml(sitemap_url), "url"
+    return sitemap_reader.urls(
+        sitemap_url, xml_reader=_sitemap_xml, allowed=_allowed,
     )
-    # Ignore outbound links even if the XML contains unexpected locations.
-    urls = []
-    for link in links:
-        try:
-            urls.append(_allowed(link))
-        except ValueError:
-            continue
-    return list(dict.fromkeys(urls))
 
 
 def _slug(url: str) -> str:
