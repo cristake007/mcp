@@ -12,3 +12,4 @@ rag/documents/
 
 # Bash harness local runtime state.
 .mcp-rag-enabled
+.mcp-gsc-enabled
