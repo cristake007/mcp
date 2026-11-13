@@ -6,7 +6,7 @@ Offsets are Unicode code-point positions in extracted visible text.
 import re
 from collections.abc import Iterable
 
-from app.site_inspector import _visible_text
+from app.html_text import visible_text as _visible_text
 
 
 def normalize_fields(fields: list[str] | None) -> tuple[str, ...] | None:
