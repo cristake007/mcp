@@ -128,6 +128,14 @@ if tool_enabled("search_courses"):
     from app.course_search import search_courses
     mcp.tool()(search_courses)
 
+# The focused catalog tools have one purpose and a typed response each.
+# Keep search_courses(action=...) for older MCP clients until migration.
+from app.catalog_tools import list_domains, list_courses, get_course, find_courses
+
+for catalog_tool in (list_domains, list_courses, get_course, find_courses):
+    if tool_enabled(catalog_tool.__name__):
+        mcp.tool()(catalog_tool)
+
 
 def login_cookie(ticket: str) -> str:
     return hmac.new(
