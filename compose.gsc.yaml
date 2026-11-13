@@ -1,0 +1,15 @@
+# Opt-in integration: Google Search Console is private and read-only.
+# The service-account JSON remains on the VPS and is never baked into images,
+# passed via environment variables or accessible to the PostgreSQL container.
+services:
+  mcp:
+    environment:
+      MCP_GSC_ENABLED: "1"
+      MCP_GSC_SITE_URL: ${MCP_GSC_SITE_URL:-sc-domain:tuvkarpat.ro}
+    volumes:
+      - type: bind
+        source: ${MCP_GSC_KEY_FILE:-/etc/tuv-mcp/credentials/gsc.json}
+        target: /run/secrets/gsc.json
+        read_only: true
+        bind:
+          create_host_path: false
