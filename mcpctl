@@ -8,8 +8,10 @@ RAG="$ROOT/rag"
 MAIN_ENV="$ROOT/.env"
 RAG_ENV="$RAG/.env"
 RAG_FLAG="$ROOT/.mcp-rag-enabled"
+GSC_FLAG="$ROOT/.mcp-gsc-enabled"
+GSC_KEY_FILE="${MCP_GSC_KEY_FILE:-/etc/tuv-mcp/credentials/gsc.json}"
 cd "$ROOT"
-TOOLS=(ping whoami inspect_site search_courses list_domains list_courses get_course find_courses list_sitemaps list_site_urls get_site_text search_site
+TOOLS=(ping whoami inspect_site search_courses list_domains list_courses get_course find_courses list_sitemaps list_site_urls get_site_text search_site gsc_performance gsc_inspect_url
        search_docs get_text get_document_context corpus_stats list_docs document_status
        corpus_health get_page_image show_rag_sources get_rag_page_data)
 
@@ -33,6 +35,10 @@ MCP Control — comenzi administrative (din orice director)
   ./mcpctl tools enable NUME         Activeaza un instrument
   ./mcpctl tools disable NUME        Dezactiveaza un instrument
 
+  ./mcpctl gsc enable                Activeaza Search Console (cheie VPS read-only)
+  ./mcpctl gsc disable               Dezactiveaza Search Console
+  ./mcpctl gsc status                Starea integrarii Search Console
+
   ./mcpctl rag enable                Activeaza integrarea MCP ↔ RAG
   ./mcpctl rag disable               Dezactiveaza integrarea, PASTREAZA RAG
   ./mcpctl rag status                Starea RAG
@@ -51,6 +57,7 @@ MCP Control — comenzi administrative (din orice director)
 
 Tool-uri: ping, whoami, inspect_site, search_courses, list_domains, list_courses, get_course, find_courses,
           list_sitemaps, list_site_urls, get_site_text, search_site,
+          gsc_performance, gsc_inspect_url,
           search_docs, get_text, get_document_context, corpus_stats,
           list_docs, document_status, corpus_health, get_page_image, show_rag_sources, get_rag_page_data
 Exemple:
@@ -134,13 +141,15 @@ rag_connected() {
 
 mcp_compose() {
     need_main_env
-    if rag_connected; then
+    local -a opts=(--env-file "$MAIN_ENV" -f "$ROOT/compose.yaml")
+    if [[ "${MCPCTL_SKIP_RAG:-0}" != "1" ]] && rag_connected; then
         need_rag_env
-        docker compose --env-file "$MAIN_ENV" --env-file "$RAG_ENV" \
-            -f "$ROOT/compose.yaml" -f "$ROOT/compose.rag.yaml" "$@"
-    else
-        docker compose -f "$ROOT/compose.yaml" "$@"
+        opts+=(--env-file "$RAG_ENV" -f "$ROOT/compose.rag.yaml")
     fi
+    if [[ -f "$GSC_FLAG" ]]; then
+        opts+=(-f "$ROOT/compose.gsc.yaml")
+    fi
+    docker compose "${opts[@]}" "$@"
 }
 
 rag_compose() {
@@ -156,6 +165,8 @@ tool_list() {
     for tool in "${TOOLS[@]}"; do
         if is_disabled "$disabled" "$tool"; then
             state="disabled"
+        elif [[ "$tool" == "gsc_performance" || "$tool" == "gsc_inspect_url" ]] && [[ ! -f "$GSC_FLAG" ]]; then
+            state="unavailable (GSC neconectat)"
         elif [[ "$tool" == "search_docs" || "$tool" == "get_text" || "$tool" == "get_document_context" || "$tool" == "corpus_stats" || "$tool" == "list_docs" || "$tool" == "document_status" || "$tool" == "corpus_health" || "$tool" == "get_page_image" || "$tool" == "show_rag_sources" || "$tool" == "get_rag_page_data" ]] && (( ! rag_state )); then
             state="unavailable (RAG neconectat)"
         else
@@ -186,6 +197,69 @@ tool_change() {
     tool_list
 }
 
+gsc_status() {
+    if [[ -f "$GSC_FLAG" ]]; then
+        info "Google Search Console: activ (read-only)"
+    else
+        info "Google Search Console: dezactivat"
+    fi
+    if [[ -f "$GSC_KEY_FILE" ]]; then
+        info "Fisierul de acreditari exista pe host (continutul nu este afisat)."
+    else
+        info "Fisierul de acreditari lipseste de pe host."
+    fi
+}
+
+gsc_enable() {
+    need_docker
+    need_main_env
+    [[ -f "$GSC_KEY_FILE" ]] || die "Lipseste cheia GSC: $GSC_KEY_FILE"
+    [[ ! -L "$GSC_KEY_FILE" ]] || die "Fisierul GSC nu poate fi symlink."
+    local mode uid gid
+    mode="$(stat -c '%a' "$GSC_KEY_FILE")"
+    uid="$(stat -c '%u' "$GSC_KEY_FILE")"
+    gid="$(stat -c '%g' "$GSC_KEY_FILE")"
+    [[ "$mode" == "400" && "$uid" == "10001" && "$gid" == "10001" ]] ||
+        die "Cheia GSC trebuie sa aiba permisiuni 400 si owner 10001:10001."
+    : > "$GSC_FLAG"
+    chmod 600 "$GSC_FLAG"
+    if ! mcp_compose up -d --no-deps --build --force-recreate mcp; then
+        rm -f -- "$GSC_FLAG"
+        die "Activarea GSC a esuat. Configuratia opt-in a fost anulata."
+    fi
+    info "GSC read-only activat. Cheia nu a fost copiata in Docker image."
+    tool_list
+}
+
+gsc_disable() {
+    need_docker
+    need_main_env
+    if [[ ! -f "$GSC_FLAG" ]]; then
+        info "GSC este deja dezactivat."
+        return
+    fi
+    rm -f -- "$GSC_FLAG"
+    if ! mcp_compose up -d --no-deps --force-recreate mcp; then
+        : > "$GSC_FLAG"
+        chmod 600 "$GSC_FLAG"
+        die "Dezactivarea GSC a esuat; markerul a fost restaurat."
+    fi
+    info "GSC dezactivat. Fisierul privat de pe host nu a fost sters."
+    tool_list
+}
+
+gsc_command() {
+    local action="$1"
+    shift
+    [[ $# == 0 ]] || die "gsc $action nu accepta argumente"
+    case "$action" in
+        enable) gsc_enable ;;
+        disable) gsc_disable ;;
+        status) gsc_status ;;
+        *) die "Comanda gsc invalida. Foloseste: ./mcpctl help";;
+    esac
+}
+
 ensure_bridge_token() {
     local token
     token="$(env_get "$RAG_ENV" RAG_API_TOKEN)"
@@ -212,11 +286,12 @@ rag_enable() {
     docker compose --env-file "$RAG_ENV" -f "$RAG/compose.yaml" \
         -f "$RAG/compose.mcp.yaml" up -d --build indexer api
     info "Activez instrumentele RAG in MCP..."
-    docker compose --env-file "$MAIN_ENV" --env-file "$RAG_ENV" \
-        -f "$ROOT/compose.yaml" -f "$ROOT/compose.rag.yaml" \
-        up -d --no-deps --build mcp
     : > "$RAG_FLAG"
     chmod 600 "$RAG_FLAG"
+    if ! mcp_compose up -d --no-deps --build mcp; then
+        rm -f -- "$RAG_FLAG"
+        die "Integrarea RAG a esuat; markerul a fost anulat."
+    fi
     info "Integrare RAG activa. Nu am modificat baza sau documentele RAG."
     tool_list
 }
@@ -228,9 +303,13 @@ rag_disable() {
         info "Integrarea este deja dezactivata."
         return
     fi
-    info "Revin la MCP independent..."
-    docker compose -f "$ROOT/compose.yaml" up -d --no-deps mcp
+    info "Revin la MCP independent, pastrand GSC daca este activ..."
     rm -f -- "$RAG_FLAG"
+    if ! MCPCTL_SKIP_RAG=1 mcp_compose up -d --no-deps --force-recreate mcp; then
+        : > "$RAG_FLAG"
+        chmod 600 "$RAG_FLAG"
+        die "Dezactivarea RAG a esuat; markerul a fost restaurat."
+    fi
     if [[ -f "$RAG_ENV" ]] && [[ -n "$(env_get "$RAG_ENV" RAG_API_TOKEN)" ]]; then
         docker compose --env-file "$RAG_ENV" -f "$RAG/compose.yaml" \
             -f "$RAG/compose.mcp.yaml" stop api
@@ -252,6 +331,8 @@ mcp_status() {
     docker compose -f "$ROOT/compose.yaml" ps
     info ""
     rag_status
+    info ""
+    gsc_status
     info ""
     tool_list
 }
@@ -355,6 +436,11 @@ main() {
                 enable|disable) [[ $# == 1 ]] || die "Utilizare: tools $action NUME"; tool_change "$action" "$1" ;;
                 *) die "Comanda tools invalida. Foloseste: ./mcpctl help";;
             esac
+            ;;
+        gsc)
+            [[ $# -ge 1 ]] || die "Lipseste comanda gsc."
+            action="$1"; shift
+            gsc_command "$action" "$@"
             ;;
         rag)
             [[ $# -ge 1 ]] || die "Lipseste comanda rag."
