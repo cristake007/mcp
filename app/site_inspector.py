@@ -25,7 +25,7 @@ from app.site_sitemaps import (
     xml_locations as _xml_locations,
     index_pages_in_sitemap as _index_pages_in_sitemap,
 )
-from app.site_text import page_chunks as _page_chunks
+from app.site_text import as_search_text as _as_search_text, page_chunks as _page_chunks
 from app.html_text import visible_text as _visible_text, clean_html as _clean_html
 from app.site_fields import normalize_fields, extract_with_sources, slice_sources
 from app.text_matching import accent_fold_with_positions
