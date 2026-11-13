@@ -8,6 +8,10 @@ from typing import Literal
 from app import course_catalog as catalog
 from app import course_search_service as engine
 from app import site_client as site
+# Historical module constants used by existing consumers and test integrations.
+COURSE_SITEMAP = engine.COURSE_SITEMAP
+COURSE_API = engine.COURSE_API
+
 from app.course_search_service import (
     CourseError, CourseFieldMatch, CourseMatch, CoursePosition,
     CourseQueryTotal, CourseSearchResult, CourseTermMatch,
