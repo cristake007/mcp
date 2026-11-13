@@ -25,10 +25,10 @@ from app.site_sitemaps import (
     xml_locations as _xml_locations,
     index_pages_in_sitemap as _index_pages_in_sitemap,
 )
-from app.site_text import as_search_text as _as_search_text, page_chunks as _page_chunks
+from app.site_text import page_chunks as _page_chunks
 from app.html_text import visible_text as _visible_text, clean_html as _clean_html
 from app.site_fields import normalize_fields, extract_with_sources, slice_sources
-from app.text_matching import TextMatcher, accent_fold_with_positions
+from app.text_matching import accent_fold_with_positions
 
 ROOT = "https://tuvkarpat.ro/"
 SITEMAP_INDEX = ROOT + "sitemap_index.xml"
@@ -322,23 +322,9 @@ def _batch_page(url: str, chars_per_page: int, fields: tuple[str, ...] | None = 
 
 
 def _search_one(entry: tuple[str, str], query: str) -> dict | None:
-    url, sitemap = entry
-    data = _read_page(url)
-    content = _as_search_text(data)
-    lowered, needle = content.casefold(), query.casefold()
-    count = lowered.count(needle)
-    if not count:
-        return None
-    snippets = []
-    start = 0
-    for _ in range(min(count, 3)):
-        pos = lowered.find(needle, start)
-        if pos == -1:
-            break
-        snippets.append(content[max(0, pos - 90): min(len(content), pos + len(query) + 90)])
-        start = pos + len(query)
-    return {"url": url, "sitemap": sitemap, "occurrences": count, "snippets": snippets}
-
+    """Compatibility adapter to the reusable lexical search service."""
+    from app.site_search_service import search_one
+    return search_one(entry, query, read_page=_read_page)
 
 
 def _accent_fold_with_positions(value: str) -> tuple[str, list[int]]:
@@ -349,27 +335,9 @@ def _accent_fold_with_positions(value: str) -> tuple[str, list[int]]:
 def _search_many_one(
     entry: tuple[str, str], queries: list[str], match_mode: str,
 ) -> dict | None:
-    """Read each page once and reuse a normalized matcher for every term."""
-    url, sitemap = entry
-    content = _as_search_text(_read_page(url))
-    matcher = TextMatcher(content, match_mode)
-    found = []
-    for query in queries:
-        hits = matcher.positions(query)
-        if not hits:
-            continue
-        found.append({
-            "query": query,
-            "occurrences": len(hits),
-            "positions": [{"start": start, "end": end} for start, end in hits[:3]],
-            "snippets": [
-                content[max(0, start - 90): min(len(content), end + 90)]
-                for start, end in hits[:3]
-            ],
-        })
-    if not found:
-        return None
-    return {"url": url, "sitemap": sitemap, "terms": found}
+    """Compatibility adapter to the reusable multi-term search service."""
+    from app.site_search_service import search_many_one
+    return search_many_one(entry, queries, match_mode, read_page=_read_page)
 
 
 def _search_entries(sitemap: str) -> list[tuple[str, str]]:
@@ -582,85 +550,22 @@ def _inspect_batch(action, sitemap, domain, offset, limit, max_chars, selectors,
 
 
 def _inspect_search_many(queries, match_mode, sitemap, offset, limit):
-    """Implementation of the search_many site-inspection operation."""
-    action = "search_many"
-    if not isinstance(queries, list) or not 1 <= len(queries) <= 10:
-        raise ValueError("search_many necesită queries cu 1..10 termeni")
-    if match_mode not in ("exact", "whole_word", "accent_insensitive"):
-        raise ValueError("match_mode: exact, whole_word sau accent_insensitive")
-    seen_terms = set()
-    for term in queries:
-        if not isinstance(term, str) or not 1 <= len(term.strip()) <= 120:
-            raise ValueError("Fiecare termen trebuie să conțină 1..120 caractere")
-        normalized = term.casefold()
-        if normalized in seen_terms:
-            raise ValueError("Termeni duplicați în queries")
-        seen_terms.add(normalized)
-        if match_mode == "accent_insensitive" and not _accent_fold_with_positions(term)[0].strip():
-            raise ValueError("Termenul nu conține caractere căutabile")
-    entries = _search_entries(sitemap)
-    batch = entries[offset:offset + min(limit, 20)]
-    matches, errors = [], []
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(contextvars.copy_context().run, _search_many_one, item, queries, match_mode) for item in batch]
-        for item, future in zip(batch, futures):
-            try:
-                result = future.result()
-                if result:
-                    matches.append(result)
-            except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
-                errors.append({"url": item[0], "error": str(exc)[:200]})
-    totals = {
-        term: {"query": term, "matching_urls": 0, "occurrences": 0}
-        for term in queries
-    }
-    for result in matches:
-        for match in result["terms"]:
-            summary = totals[match["query"]]
-            summary["matching_urls"] += 1
-            summary["occurrences"] += match["occurrences"]
-    next_offset = offset + len(batch)
-    next_offset = next_offset if next_offset < len(entries) else None
-    return {
-        "action": action, "queries": queries, "match_mode": match_mode,
-        "sitemap": sitemap or "all", "total_urls": len(entries),
-        "scanned": len(batch), "offset": offset, "next_offset": next_offset,
-        "complete": next_offset is None and not errors,
-        "matches": matches, "query_totals": list(totals.values()),
-        "totals_scope": "current_batch", "errors": errors,
-        "note": "Continue next_offset and inspect errors for full coverage. "
-                "Results are literal text matches, not linguistic conclusions.",
-    }
+    """Legacy MCP adapter, delegating matching and pagination to a service."""
+    from app.site_search_service import search_many
+    return search_many(
+        queries, match_mode, sitemap, offset, limit,
+        list_entries=_search_entries, inspect_one=_search_many_one,
+    )
 
 
 def _inspect_search(query, sitemap, offset, limit):
-    """Implementation of the search site-inspection operation."""
-    action = "search"
-    if not query or not query.strip() or len(query) > 200:
-        raise ValueError("query trebuie să conțină între 1 și 200 de caractere")
-    entries = _search_entries(sitemap)
-    scan_count = min(limit, 20)
-    batch = entries[offset:offset + scan_count]
-    matches = []
-    errors = []
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(contextvars.copy_context().run, _search_one, item, query) for item in batch]
-        for item, future in zip(batch, futures):
-            try:
-                match = future.result()
-                if match:
-                    matches.append(match)
-            except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
-                errors.append({"url": item[0], "error": str(exc)[:200]})
-    nxt = offset + len(batch)
-    next_offset = nxt if nxt < len(entries) else None
-    return {
-        "action": action, "query": query, "sitemap": sitemap or "all",
-        "total_urls": len(entries), "scanned": len(batch), "offset": offset,
-        "next_offset": next_offset,
-        "complete": next_offset is None and not errors,
-        "matches": matches, "errors": errors,
-    }
+    """Legacy MCP adapter for single-term search."""
+    from app.site_search_service import search_legacy
+    return search_legacy(
+        query, sitemap, offset, limit,
+        list_entries=_search_entries, inspect_one=_search_one,
+    )
+
 
 @_refresh_scope
 def inspect_site(
