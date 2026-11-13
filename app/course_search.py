@@ -15,6 +15,7 @@ from app.html_text import visible_text
 from app.site_fields import extract_with_sources
 from app.text_matching import find_positions
 from app.wp_api import iter_collection
+from app.course_integrity import course_identity, page_size_for_count
 
 COURSE_SITEMAP = site.ROOT + "cursuri-sitemap.xml"
 COURSE_API = site.ROOT + "wp-json/wp/v2/cursuri"
@@ -138,25 +139,29 @@ def _match_course(url: str, item: dict, queries: list[str], match_mode: str) -> 
 
 
 def _collection(sitemap_urls: list[str]) -> dict[str, dict]:
-    """Use native WP REST pagination, then reconcile against the sitemap.
+    """Reconcile every public REST course against the published sitemap.
 
-    Missing ACF entries are recovered individually by the calling service.
+    Never silently discard out-of-sitemap entries, overwrite duplicates or
+    accept conflicting WordPress IDs. Missing ACF is handled by exact-URL
+    recovery in the search service, not silently treated as a valid full page.
     """
-    allowed = set(sitemap_urls)
+    expected = set(sitemap_urls)
     catalog = {}
-    max_pages = (len(allowed) + PAGE_SIZE - 1) // PAGE_SIZE + 5
+    ids = set()
+    page_size = page_size_for_count(len(expected))
+    max_pages = (len(expected) + page_size - 1) // page_size + 5
     for items in iter_collection(
         site.fetch, COURSE_API, fields="id,link,title,acf,domenii,slug",
-        page_size=PAGE_SIZE, max_pages=max_pages,
+        page_size=page_size, max_pages=max_pages,
     ):
         for item in items:
-            if not isinstance(item, dict):
-                continue
-            link = item.get("link")
-            if isinstance(link, str) and link in allowed:
-                catalog[link] = item
-        if len(catalog) == len(allowed):
-            return catalog
+            course_id, link = course_identity(item)
+            if link not in expected:
+                raise RuntimeError("Curs REST absent din sitemap: " + link)
+            if link in catalog or course_id in ids:
+                raise RuntimeError("Curs duplicat în REST API: " + link)
+            catalog[link] = item
+            ids.add(course_id)
     return catalog
 
 
@@ -202,7 +207,7 @@ def _search_original(
         catalog = _collection(urls)
     except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
         catalog = {}
-        errors.append({"url": COURSE_API, "error": "Colecția REST indisponibilă: " + str(exc)[:200]})
+        errors.append({"url": COURSE_API, "error": "Colecția REST invalidă sau indisponibilă: " + str(exc)[:200]})
 
     unresolved = [url for url in urls if url not in catalog
                   or not isinstance(catalog[url].get("acf"), (dict, list))
@@ -284,8 +289,17 @@ def _list_catalog_courses(domain: str | int | None) -> CourseSearchResult:
     result = _catalog_result("list_courses")
     if domain is None:
         urls = catalog.course_urls()
-        items = _collection(urls)
         result["total_courses"] = len(urls)
+        try:
+            items = _collection(urls)
+        except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
+            # Fail closed without making the focused listing tool unusable.
+            result["courses"] = []
+            result["errors"] = [{"url": COURSE_API, "error": str(exc)[:200]}]
+            result["missing_courses_count"] = len(urls)
+            result["complete"] = False
+            result["note"] = "Colecția REST este invalidă sau indisponibilă; lista nu este exhaustivă."
+            return result
         ordered = [items[url] for url in urls if url in items]
     else:
         term, ordered = catalog.domain_items(domain)
