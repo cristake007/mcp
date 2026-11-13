@@ -25,7 +25,6 @@ from bs4 import BeautifulSoup
 
 from app.site_output import SiteInspectionResult
 from app.text_matching import TextMatcher, accent_fold_with_positions
-from app.site_fields import normalize_fields, extract_with_sources, slice_sources
 
 ROOT = "https://tuvkarpat.ro/"
 SITEMAP_INDEX = ROOT + "sitemap_index.xml"
@@ -611,6 +610,7 @@ def _verify_findings(findings, selectors, force_refresh):
 
 def _inspect_verify_quote(url, field, quote):
     """Implementation of the verify_quote site-inspection operation."""
+    from app.site_fields import normalize_fields, extract_with_sources
     action = "verify_quote"
     if not url:
         raise ValueError("verify_quote necesită url")
@@ -633,6 +633,7 @@ def _inspect_verify_quote(url, field, quote):
 
 def _inspect_audit_ack(url, expected_hash, reviews, selectors):
     """Implementation of the audit_ack site-inspection operation."""
+    from app.site_fields import extract_with_sources
     action = "audit_ack"
     from app.site_audit import save_reviews
     entries = reviews if reviews is not None else [{"url": url, "sha256": expected_hash}]
@@ -715,6 +716,7 @@ def _inspect_urls(sitemap, domain, offset, limit):
 
 def _inspect_get(url, view, selectors, part, max_chars, expected_hash, force_refresh):
     """Implementation of the get site-inspection operation."""
+    from app.site_fields import extract_with_sources, slice_sources
     action = "get"
     if not url:
         raise ValueError("Precizează url")
@@ -1079,6 +1081,7 @@ def inspect_site(
         return invalid("view", view, "'raw' sau 'text'", "raw")
 
 
+    from app.site_fields import normalize_fields
     selectors = normalize_fields(fields)
 
     if action == "verify_findings":
