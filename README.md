@@ -133,8 +133,9 @@ change does not introduce a separate public authorization boundary.
 
 ### Site access architecture (dev)
 
-The website tools and legacy `inspect_site` now share the following components:
+The website tools, course catalog/search and legacy `inspect_site` now share the following components:
 
+- `app/site_client.py`: shared transport/WordPress/sitemap facade with scoped `force_refresh` and page evidence; catalog/search import this module rather than the inspector
 - `app/site_transport.py`: fixed-host HTTPS allowlist, non-redirecting curl
   transport, request-level refresh context and HTTP cache evidence
 - `app/site_wordpress.py`: WordPress REST slug lookup, post/course resolution
@@ -145,7 +146,7 @@ The website tools and legacy `inspect_site` now share the following components:
 - `app/site_inspector.py`: remaining operation orchestration and backward
   compatible entrypoints (including `_fetch`, `_read_page`, `_sitemap_xml`)
 
-The low-level transport does **not** accept arbitrary sites or follow redirects.
+The course catalog and course search no longer depend on `site_inspector.py`; the latter remains a compatibility interface. Shared request context and source identity checks are now tested independently.\n\nThe low-level transport does **not** accept arbitrary sites or follow redirects.
 WordPress/course completeness remains checked against the public sitemap. No
 database migration, OAuth change or extra plugin permission was introduced.
 The old inspector tool remains available; removing it requires a separate
