@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from app import site_transport as transport
 from app import site_wordpress as wordpress
 from app import site_inspector as inspector
+from app import site_sitemap_reader as sitemap_reader
 
 ROOT = "https://tuvkarpat.ro/"
 COURSE = ROOT + "cursuri/introducere-in-ergonomie/"
@@ -68,6 +69,55 @@ class TransportTests(unittest.TestCase):
             transport._EVIDENCE.reset(recording)
             transport._REFRESH.reset(context)
         self.assertFalse(transport._REFRESH.get())
+
+
+class SitemapReaderTests(unittest.TestCase):
+    def test_cached_xml_is_reused_but_force_refresh_fails_closed(self):
+        sitemap = ROOT + "cursuri-sitemap.xml"
+        xml = "<urlset><url><loc>" + COURSE + "</loc></url></urlset>"
+        fetch = Mock(return_value=xml)
+        with patch.dict(sitemap_reader.SITEMAP_CACHE, {}, clear=True):
+            self.assertEqual(sitemap_reader.sitemap_xml(
+                sitemap, allowed=transport.allowed, fetch=fetch,
+                refresh=False,
+            ), xml)
+            self.assertEqual(sitemap_reader.sitemap_xml(
+                sitemap, allowed=transport.allowed,
+                fetch=Mock(side_effect=RuntimeError("network unavailable")),
+                refresh=False,
+            ), xml)
+            with self.assertRaisesRegex(RuntimeError, "network unavailable"):
+                sitemap_reader.sitemap_xml(
+                    sitemap, allowed=transport.allowed,
+                    fetch=Mock(side_effect=RuntimeError("network unavailable")),
+                    refresh=True,
+                )
+
+    def test_sitemap_discovery_excludes_external_urls(self):
+        sitemap = ROOT + "cursuri-sitemap.xml"
+        index = ROOT + "sitemap_index.xml"
+        xml_index = ("<sitemapindex><sitemap><loc>" + sitemap
+                     + "</loc></sitemap></sitemapindex>")
+        xml_pages = ("<urlset><url><loc>" + COURSE + "</loc></url>"
+                     "<url><loc>https://evil.example/</loc></url>"
+                     "<url><loc>" + COURSE + "</loc></url></urlset>")
+        data = {index: xml_index, sitemap: xml_pages}
+        reader = lambda url: data[url]
+        self.assertEqual(sitemap_reader.sitemaps(
+            index=index, xml_reader=reader, allowed=transport.allowed,
+        ), [sitemap])
+        self.assertEqual(sitemap_reader.urls(
+            sitemap, xml_reader=reader, allowed=transport.allowed,
+        ), [COURSE])
+        self.assertEqual(sitemap_reader.sitemap_url(
+            "cursuri-sitemap.xml", [sitemap], root=ROOT,
+            allowed=transport.allowed,
+        ), sitemap)
+        with self.assertRaises(ValueError):
+            sitemap_reader.sitemap_url(
+                "https://evil.example/sitemap.xml", [sitemap], root=ROOT,
+                allowed=transport.allowed,
+            )
 
 
 class WordPressTests(unittest.TestCase):
