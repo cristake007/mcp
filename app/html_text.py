@@ -51,3 +51,17 @@ def visible_text(html_or_text: str) -> str:
     text = "".join(pieces)
     text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+REMOVE_HTML = (
+    "script, meta, iframe, noscript, "
+    "body > header, body > footer, "
+    ".elementor-location-header, .elementor-location-footer"
+)
+
+def clean_html(raw: str) -> str:
+    soup = BeautifulSoup(raw, "html.parser")
+    for element in soup.select(REMOVE_HTML):
+        element.decompose()
+    # Do not prettify: inserted indentation/newlines can split inline words.
+    return str(soup.body or soup)
