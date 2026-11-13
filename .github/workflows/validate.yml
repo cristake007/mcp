@@ -69,10 +69,21 @@ jobs:
         env:
           RAG_API_TOKEN: ci-bridge-long-secret-0123456789abcdef
         run: docker compose -f compose.yaml -f compose.rag.yaml config -q
+      - name: Validate opt-in GSC and combined RAG overlays
+        env:
+          RAG_API_TOKEN: ci-bridge-long-secret-0123456789abcdef
+        run: |
+          docker compose -f compose.yaml -f compose.gsc.yaml config -q
+          docker compose -f compose.yaml -f compose.rag.yaml -f compose.gsc.yaml config -q
       - name: Verify RAG tools are optional and preserve literal text
         run: |
           MCP_RAG_ENABLED=0 python -m tests.rag_optional
           MCP_RAG_ENABLED=1 MCP_RAG_URL=http://rag-api:8080 MCP_RAG_API_TOKEN=ci-bridge-long-secret-0123456789abcdef python -m tests.rag_optional
+      - name: Verify GSC tools are read-only, typed and opt-in
+        run: |
+          MCP_GSC_ENABLED=0 python -m tests.gsc_optional
+          MCP_GSC_ENABLED=1 python -m tests.gsc_optional
+          MCP_GSC_ENABLED=1 MCP_RAG_ENABLED=1 python -m tests.rag_optional
       - name: Validate MCP Apps viewer and private image bridge
         run: python -m tests.rag_viewer_optional
       - name: Test inspect_site (offline, no live site requests)
