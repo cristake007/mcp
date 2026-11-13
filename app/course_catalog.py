@@ -8,6 +8,7 @@ import json
 from urllib.parse import quote
 
 from app import site_inspector as site
+from app.wp_api import iter_collection, read_json
 
 ROOT = site.ROOT
 COURSE_SITEMAP = ROOT + "cursuri-sitemap.xml"
@@ -27,15 +28,12 @@ def course_urls() -> list[str]:
 
 
 def domains() -> list[dict]:
-    """Retrieve all taxonomy terms; never follow term.link (may return 404)."""
+    """Retrieve taxonomy terms using native WordPress REST pagination."""
     terms = []
     seen = set()
-    for page in range(1, 51):
-        url = (f"{DOMAIN_API}?per_page={PAGE_SIZE}&page={page}"
-               "&_fields=id,name,slug,count")
-        entries = json.loads(site._fetch(url, "application/json"))
-        if not isinstance(entries, list) or len(entries) > PAGE_SIZE:
-            raise RuntimeError("Lista taxonomiei domenii este invalidă")
+    for entries in iter_collection(
+        site._fetch, DOMAIN_API, fields="id,name,slug,count", max_pages=50,
+    ):
         for entry in entries:
             if (not isinstance(entry, dict)
                     or type(entry.get("id")) is not int
@@ -47,9 +45,7 @@ def domains() -> list[dict]:
                 raise RuntimeError("Termen de domeniu invalid sau duplicat")
             seen.add(entry["id"])
             terms.append({key: entry[key] for key in ("id", "name", "slug", "count")})
-        if len(entries) < PAGE_SIZE:
-            return terms
-    raise RuntimeError("Prea multe pagini în taxonomia domenii")
+    return terms
 
 
 def resolve_domain(domain: str | int) -> dict:
@@ -88,17 +84,15 @@ def course_summary(item: dict) -> dict:
 
 
 def domain_items(domain: str | int) -> tuple[dict, list[dict]]:
-    """Domain members from native WP filter, validated against sitemap/count."""
+    """Domain members from native WP filtering, reconciled with sitemap/count."""
     term = resolve_domain(domain)
     urls = course_urls()
     allowed = set(urls)
     found = {}
-    for page in range(1, 51):
-        url = (f"{COURSE_API}?domenii={term['id']}&per_page={PAGE_SIZE}"
-               f"&page={page}&_fields={FIELDS}")
-        entries = json.loads(site._fetch(url, "application/json"))
-        if not isinstance(entries, list) or len(entries) > PAGE_SIZE:
-            raise RuntimeError("REST API a returnat o colecție de cursuri invalidă")
+    for entries in iter_collection(
+        site._fetch, COURSE_API, fields=FIELDS,
+        filters=(("domenii", term["id"]),), max_pages=50,
+    ):
         for item in entries:
             info = course_summary(item)
             if term["id"] not in info["domenii"]:
@@ -108,10 +102,8 @@ def domain_items(domain: str | int) -> tuple[dict, list[dict]]:
             if info["url"] in found:
                 raise RuntimeError("Curs duplicat în REST API: " + info["url"])
             found[info["url"]] = item
-        if len(found) >= term["count"] or len(entries) < PAGE_SIZE:
+        if len(found) >= term["count"]:
             break
-    else:
-        raise RuntimeError("Limita de paginare pentru cursuri a fost depășită")
     if len(found) != term["count"]:
         raise RuntimeError(
             f"Domeniul {term['slug']} declară {term['count']} cursuri, "
@@ -127,7 +119,7 @@ def domain_urls(domain: str | int) -> tuple[dict, list[str]]:
 def get_course(course: str | int) -> dict:
     if type(course) is int and course > 0:
         endpoint = f"{COURSE_API}/{course}?_fields={FIELDS}"
-        item = json.loads(site._fetch(endpoint, "application/json"))
+        item = read_json(site._fetch, endpoint)
         if not isinstance(item, dict) or item.get("id") != course:
             raise ValueError("REST API a returnat alt curs")
     elif isinstance(course, str) and 1 <= len(course.strip()) <= 250:
