@@ -131,6 +131,27 @@ operations (`verify_findings`, `audit_changes`, `audit_ack`,
 All tools currently require the server's existing OAuth authentication; this
 change does not introduce a separate public authorization boundary.
 
+### Site access architecture (dev)
+
+The website tools and legacy `inspect_site` now share the following components:
+
+- `app/site_transport.py`: fixed-host HTTPS allowlist, non-redirecting curl
+  transport, request-level refresh context and HTTP cache evidence
+- `app/site_wordpress.py`: WordPress REST slug lookup, post/course resolution
+  and HTML fallback; receives the transport as an injected dependency
+- `app/site_sitemap_reader.py`: short-lived XML sitemap cache, discovery
+  and URL filtering; forced refresh never falls back to a stale response
+- `app/site_sitemaps.py`: pure XML parsing and sitemap archive filtering
+- `app/site_inspector.py`: remaining operation orchestration and backward
+  compatible entrypoints (including `_fetch`, `_read_page`, `_sitemap_xml`)
+
+The low-level transport does **not** accept arbitrary sites or follow redirects.
+WordPress/course completeness remains checked against the public sitemap. No
+database migration, OAuth change or extra plugin permission was introduced.
+The old inspector tool remains available; removing it requires a separate
+compatibility migration. The CI workflow includes offline tests of host
+restrictions, WordPress page identity, sitemap freshness and pagination.
+
 ## Live site inspection (independent of RAG)
 
 The single **`inspect_site`** MCP tool queries public content on
