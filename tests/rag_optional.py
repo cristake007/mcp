@@ -14,6 +14,8 @@ async def main():
     expected = {"ping", "whoami", "inspect_site", "search_courses",
                 "list_domains", "list_courses", "get_course", "find_courses",
                 "list_sitemaps", "list_site_urls", "get_site_text", "search_site"}
+    if os.getenv("MCP_GSC_ENABLED") == "1":
+        expected |= {"gsc_performance", "gsc_inspect_url"}
     if enabled:
         expected |= {"search_docs", "get_text", "get_document_context", "corpus_stats", "list_docs", "document_status", "corpus_health", "get_page_image", "show_rag_sources", "get_rag_page_data"}
     expected -= disabled
