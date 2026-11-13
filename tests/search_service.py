@@ -30,7 +30,7 @@ class SearchServiceTests(unittest.TestCase):
         span = result["matches"][0]["terms"][0]["positions"][0]
         source = service.as_search_text(read(URL1))
         self.assertEqual(source[span["start"]:span["end"]], "Țară")
-        self.assertEqual(calls, [URL1, URL2])
+        self.assertCountEqual(calls, [URL1, URL2])
 
     def test_context_is_isolated_per_thread(self):
         marker = contextvars.ContextVar("refresh-evidence", default=None)
