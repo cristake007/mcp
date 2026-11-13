@@ -2,7 +2,7 @@ name: Validate FastMCP project
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
 
 jobs:
@@ -79,6 +79,10 @@ jobs:
         run: python -m tests.site_inspector
       - name: Test search_courses (offline, no live site requests)
         run: python -m tests.course_search
+      - name: Test focused MCP catalog contracts and shared primitives
+        run: |
+          python -m tests.catalog_tools
+          python -m tests.shared_primitives
       - name: Test selective tool registration
         run: |
           MCP_DISABLED_TOOLS=whoami python -m tests.rag_optional
