@@ -11,6 +11,7 @@ from typing import Literal, NotRequired, TypedDict
 from app import site_inspector as site
 from app.site_fields import extract_with_sources
 from app.text_matching import find_positions
+from app.wp_api import iter_collection
 
 COURSE_SITEMAP = site.ROOT + "cursuri-sitemap.xml"
 COURSE_API = site.ROOT + "wp-json/wp/v2/cursuri"
@@ -134,28 +135,26 @@ def _match_course(url: str, item: dict, queries: list[str], match_mode: str) -> 
 
 
 def _collection(sitemap_urls: list[str]) -> dict[str, dict]:
-    """Fetch the REST collection in ~2 requests for a 195-course catalog.
+    """Use native WP REST pagination, then reconcile against the sitemap.
 
-    Never infer completeness from WordPress pagination alone: the sitemap is
-    authoritative for the searched set, and missing entries are recovered by URL.
+    Missing ACF entries are recovered individually by the calling service.
     """
     allowed = set(sitemap_urls)
     catalog = {}
     max_pages = (len(allowed) + PAGE_SIZE - 1) // PAGE_SIZE + 5
-    for page in range(1, max_pages + 1):
-        url = f"{COURSE_API}?per_page={PAGE_SIZE}&page={page}&_fields=id,link,title,acf,domenii,slug"
-        items = json.loads(site._fetch(url, "application/json"))
-        if not isinstance(items, list) or len(items) > PAGE_SIZE:
-            raise RuntimeError("REST API cursuri a returnat o colecție invalidă")
+    for items in iter_collection(
+        site._fetch, COURSE_API, fields="id,link,title,acf,domenii,slug",
+        page_size=PAGE_SIZE, max_pages=max_pages,
+    ):
         for item in items:
             if not isinstance(item, dict):
                 continue
             link = item.get("link")
             if isinstance(link, str) and link in allowed:
                 catalog[link] = item
-        if len(catalog) == len(allowed) or len(items) < PAGE_SIZE:
+        if len(catalog) == len(allowed):
             return catalog
-    raise RuntimeError("REST API cursuri a depășit limita de paginare sigură")
+    return catalog
 
 
 def _recover(url: str, refresh: bool) -> dict:
