@@ -39,7 +39,29 @@ Search the common identifier (e.g. `29001`) to find inconsistent spellings such 
 
 The server first reads the public sitemap, then uses the WordPress REST **course collection** (100 entries per page) instead of 195 individual HTTP requests. Missing/incomplete REST entries are individually recovered, up to a bounded fallback limit. The output includes `total_courses`, `scanned_courses`, `matching_courses`, `errors`, `missing_courses_count` and `complete`. **Never claim a complete result unless `complete=true`**. A blocked REST endpoint or missing ACF fields is reported as incomplete, not silently treated as zero matches. The sitemap is the scope: unpublished/unlisted courses and JavaScript-only text are not searched. `force_refresh=true` bypasses the MCP sitemap cache and asks intermediaries for revalidation, without guaranteeing origin freshness.
 
-### WordPress taxonomy navigation (same tool, no additional MCP tool)
+### Focused catalog tools (recommended for new MCP clients)
+
+The original `search_courses(action=...)` interface remains available for
+compatibility. New integrations should use task-specific operations:
+
+| Tool | Purpose | Parameters |
+|---|---|---|
+| `list_domains` | All real WordPress taxonomy domains | optional `force_refresh` |
+| `list_courses` | Paginated course titles, IDs, URLs and domain memberships | `domain`, `offset`, `limit`, `force_refresh` |
+| `get_course` | One course's full WordPress ACF payload | `course` (ID or slug), `force_refresh` |
+| `find_courses` | Search one query across course title and all available ACF text | `query`, `domain`, `match_mode`, `force_refresh` |
+
+For example `{"domain":"ergonomie","limit":25}` is a complete
+`list_courses` request. These tools use native WordPress REST pagination with
+server-side taxonomy filtering; catalog completeness is reconciled against the
+public sitemap and taxonomy counts. The underlying search/ACF extraction and
+Unicode matcher are shared with the older interfaces.
+
+The default FastMCP server is still private and exposes legacy administration
+tools to its authenticated users. These catalog tool changes do **not**
+implement per-user authorization or create a public marketplace endpoint.
+
+### Legacy action-based WordPress taxonomy navigation (compatibility)
 
 `search_courses` now has an optional `action` argument (default: `search`).
 Its other actions use the native `domenii` taxonomy on the `cursuri` post type,
