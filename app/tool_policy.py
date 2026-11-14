@@ -12,7 +12,8 @@ TOOLS = (
     "search_courses", "inspect_site",
     "list_sitemaps", "list_site_urls", "get_site_text", "search_site",
     # Optional Google Search Console API (read-only, private MCP only).
-    "gsc_performance", "gsc_inspect_url",
+    "gsc_performance", "gsc_inspect_url", "seo_course_queries",
+    "seo_inspect_page",
     # Optional document-RAG tools.
     "search_docs", "get_text", "get_document_context", "corpus_stats",
     "list_docs", "document_status", "corpus_health", "get_page_image",

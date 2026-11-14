@@ -137,6 +137,11 @@ if os.environ.get("MCP_GSC_ENABLED", "0") == "1":
         if tool_enabled(gsc_tool.__name__):
             mcp.tool()(gsc_tool)
 
+    # Exact-URL SEO query reporting shares the same private GSC credentials.
+    from app.seo_tools import seo_course_queries
+    if tool_enabled("seo_course_queries"):
+        mcp.tool()(seo_course_queries)
+
 
 # The focused catalog tools have one purpose and a typed response each.
 # Keep search_courses(action=...) for older MCP clients until migration.
@@ -152,6 +157,11 @@ from app.site_tools import list_sitemaps, list_site_urls, get_site_text, search_
 for site_tool in (list_sitemaps, list_site_urls, get_site_text, search_site):
     if tool_enabled(site_tool.__name__):
         mcp.tool()(site_tool)
+
+# Public HTML metadata inspection is available without Google credentials.
+from app.seo_tools import seo_inspect_page
+if tool_enabled("seo_inspect_page"):
+    mcp.tool()(seo_inspect_page)
 
 
 def login_cookie(ticket: str) -> str:

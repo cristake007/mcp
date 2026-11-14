@@ -739,3 +739,17 @@ and token revocation.
 Production hardening before wider deployment: independent penetration test,
 monitoring, backups with restore tests, regular updates, and stricter client
 registration policy if other MCP clients are not wanted.
+
+
+## Private SEO research tools (dev)
+
+Two task-oriented, read-only SEO tools reuse existing infrastructure; no third-party SEO subscription is required.
+
+- `seo_inspect_page(url, force_refresh=false)`: fetches the **public HTML** of one exact `https://tuvkarpat.ro/cursuri/<slug>/` URL through the existing non-redirecting fixed-host transport; returns HTML `<title>`, meta description, robots, Googlebot, canonical, Open Graph metadata, H1–H6, and JSON-LD type/Course field presence. Does **not** execute JavaScript, fetch HTTP `X-Robots-Tag` headers, infer SEO scores, or change content. The refresh flag attempts cache revalidation but cannot prove an origin response.
+- `seo_course_queries(url, start_date, end_date, limit=50)`: uses the **existing private GSC service account** to report one exact course page's Google Search performance, independently retrieved page totals, and top reported queries. An **equals** page dimension filter is used to avoid substring matches for similar permalinks. Query rows are non-exhaustive and must not be summed as page totals. Requires `MCP_GSC_ENABLED=1`.
+
+No API keys, credentials, database migration, WordPress plugin, new package, commercial SEO provider or open-web scraping capability are added. `seo_inspect_page` is available in ordinary private MCP mode; `seo_course_queries` is registered only with the already-enabled GSC overlay. `MCP_DISABLED_TOOLS` can independently disable either tool.
+
+**Deployment:** `git pull --ff-only origin dev`, then `./mcpctl mcp apply` (rebuild/restart) and `./mcpctl tools list`, then refresh MCP tools in ChatGPT. Verify that `gsc status` still reports active. No changes to the service account are required.
+
+These tools provide source evidence, **not** Google Keyword Planner monthly volumes, official Trends time series, competitor SERP rankings or claims that a title change guarantees improved position. For full content use the existing `get_course` / `get_site_text`; for last-known Google indexing use `gsc_inspect_url`.

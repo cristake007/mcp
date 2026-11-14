@@ -84,6 +84,10 @@ jobs:
           MCP_GSC_ENABLED=0 python -m tests.gsc_optional
           MCP_GSC_ENABLED=1 python -m tests.gsc_optional
           MCP_GSC_ENABLED=1 MCP_RAG_ENABLED=1 python -m tests.rag_optional
+      - name: Test read-only SEO page and exact-URL GSC tools
+        run: |
+          MCP_GSC_ENABLED=0 python -m tests.seo_tools
+          MCP_GSC_ENABLED=1 python -m tests.seo_tools
       - name: Validate MCP Apps viewer and private image bridge
         run: python -m tests.rag_viewer_optional
       - name: Test inspect_site (offline, no live site requests)
