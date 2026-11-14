@@ -38,6 +38,8 @@ ctl tools list | grep 'list_site_urls.*enabled' >/dev/null
 ctl tools list | grep 'get_site_text.*enabled' >/dev/null
 ctl tools list | grep 'search_site.*enabled' >/dev/null
 ctl tools list | grep 'gsc_performance.*unavailable' >/dev/null
+ctl tools list | grep 'seo_course_queries.*unavailable' >/dev/null
+ctl tools list | grep 'seo_inspect_page.*enabled' >/dev/null
 ctl tools list | grep 'gsc_inspect_url.*unavailable' >/dev/null
 ctl tools list | grep 'corpus_stats.*unavailable' >/dev/null
 ctl tools list | grep 'list_docs.*unavailable' >/dev/null
@@ -109,6 +111,7 @@ ctl mcp apply
 grep -q 'compose.gsc.yaml.*up -d --no-deps --build --force-recreate mcp' "$TMP/docker.log"
 ctl tools list | grep 'gsc_performance.*enabled' >/dev/null
 ctl tools list | grep 'gsc_inspect_url.*enabled' >/dev/null
+ctl tools list | grep 'seo_course_queries.*enabled' >/dev/null
 ctl rag enable
 grep -q 'compose.rag.yaml.*compose.gsc.yaml.*up -d --no-deps --build mcp' "$TMP/docker.log"
 ctl rag disable

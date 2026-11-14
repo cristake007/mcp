@@ -11,7 +11,7 @@ RAG_FLAG="$ROOT/.mcp-rag-enabled"
 GSC_FLAG="$ROOT/.mcp-gsc-enabled"
 GSC_KEY_FILE="${MCP_GSC_KEY_FILE:-/etc/tuv-mcp/credentials/gsc.json}"
 cd "$ROOT"
-TOOLS=(ping whoami inspect_site search_courses list_domains list_courses get_course find_courses list_sitemaps list_site_urls get_site_text search_site gsc_performance gsc_inspect_url
+TOOLS=(ping whoami inspect_site search_courses list_domains list_courses get_course find_courses list_sitemaps list_site_urls get_site_text search_site seo_inspect_page gsc_performance gsc_inspect_url seo_course_queries
        search_docs get_text get_document_context corpus_stats list_docs document_status
        corpus_health get_page_image show_rag_sources get_rag_page_data)
 
@@ -57,7 +57,7 @@ MCP Control — comenzi administrative (din orice director)
 
 Tool-uri: ping, whoami, inspect_site, search_courses, list_domains, list_courses, get_course, find_courses,
           list_sitemaps, list_site_urls, get_site_text, search_site,
-          gsc_performance, gsc_inspect_url,
+          gsc_performance, gsc_inspect_url, seo_inspect_page, seo_course_queries,
           search_docs, get_text, get_document_context, corpus_stats,
           list_docs, document_status, corpus_health, get_page_image, show_rag_sources, get_rag_page_data
 Exemple:
@@ -161,18 +161,18 @@ tool_list() {
     local disabled tool state rag_state
     disabled="$(disabled_list)"
     if rag_connected; then rag_state=1; else rag_state=0; fi
-    printf '%-16s %s\n' 'TOOL' 'STATUS'
+    printf '%-22s %s\n' 'TOOL' 'STATUS'
     for tool in "${TOOLS[@]}"; do
         if is_disabled "$disabled" "$tool"; then
             state="disabled"
-        elif [[ "$tool" == "gsc_performance" || "$tool" == "gsc_inspect_url" ]] && [[ ! -f "$GSC_FLAG" ]]; then
+        elif [[ "$tool" == "gsc_performance" || "$tool" == "gsc_inspect_url" || "$tool" == "seo_course_queries" ]] && [[ ! -f "$GSC_FLAG" ]]; then
             state="unavailable (GSC neconectat)"
         elif [[ "$tool" == "search_docs" || "$tool" == "get_text" || "$tool" == "get_document_context" || "$tool" == "corpus_stats" || "$tool" == "list_docs" || "$tool" == "document_status" || "$tool" == "corpus_health" || "$tool" == "get_page_image" || "$tool" == "show_rag_sources" || "$tool" == "get_rag_page_data" ]] && (( ! rag_state )); then
             state="unavailable (RAG neconectat)"
         else
             state="enabled"
         fi
-        printf '%-16s %s\n' "$tool" "$state"
+        printf '%-22s %s\n' "$tool" "$state"
     done
 }
 
