@@ -285,6 +285,12 @@ async def index(_request: Request):
     return PlainTextResponse("TUV Private MCP. Endpoint: /mcp")
 
 
+# Apply the optional transform only after the existing tool registration.
+# Keep the OAuth audience, HTTP endpoint and all underlying tools unchanged.
+from app.code_mode import configure_code_mode
+configure_code_mode(mcp)
+
+
 # FastMCP 4.1 native DNS-rebinding guard: validate Host and Origin for every
 # route, not only /mcp. Health checks use container-local loopback.
 app = mcp.http_app(

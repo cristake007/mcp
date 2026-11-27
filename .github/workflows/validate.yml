@@ -117,7 +117,12 @@ jobs:
           MCP_DISABLED_TOOLS=whoami python -m tests.rag_optional
           MCP_DISABLED_TOOLS=search_docs MCP_RAG_ENABLED=1 python -m tests.rag_optional
           MCP_DISABLED_TOOLS=ping,whoami MCP_RAG_ENABLED=1 python -m tests.rag_optional
+      - name: Test optional native Code Mode with real sandbox
+        run: |
+          MCP_CODE_MODE_ENABLED=1 python -m tests.code_mode
+          MCP_CODE_MODE_ENABLED=1 MCP_DISABLED_TOOLS=whoami MCP_RAG_ENABLED=1 python -m tests.code_mode
       - name: Smoke-test OAuth, MCP and token lifecycle
         run: |
           python -m app.manage init-db
           python -m tests.smoke
+          MCP_CODE_MODE_ENABLED=1 python -m tests.smoke

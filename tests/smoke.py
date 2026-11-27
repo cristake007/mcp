@@ -291,6 +291,32 @@ async def main():
             assert rpc.status_code == 200, (rpc.status_code, rpc.text)
             assert "result" in rpc.json(), rpc.text
 
+            if os.getenv("MCP_CODE_MODE_ENABLED") == "1":
+                listed = await client.post("/mcp", headers=headers, json={
+                    "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {},
+                })
+                assert listed.status_code == 200, listed.text
+                assert {t["name"] for t in listed.json()["result"]["tools"]} == {
+                    "search", "get_schema", "execute",
+                }, listed.text
+                request = {
+                    "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                    "params": {"name": "execute", "arguments": {"code":
+                        'a = await call_tool("ping", {})\n'
+                        'b = await call_tool("whoami", {})\n'
+                        'return {"ping": a, "user": b}'
+                    }},
+                }
+                unauth = await client.post("/mcp", headers={
+                    "Accept": headers["Accept"], "Content-Type": headers["Content-Type"],
+                }, json=request)
+                assert unauth.status_code == 401, unauth.text
+                executed = await client.post("/mcp", headers=headers, json=request)
+                assert executed.status_code == 200, executed.text
+                result = executed.json()["result"]
+                assert not result.get("isError"), result
+                assert "pong" in str(result) and "oauth-smoke@example.org" in str(result), result
+
             # A DB token record with the wrong audience must never authenticate.
             async with connection() as conn:
                 async with conn.cursor() as cur:

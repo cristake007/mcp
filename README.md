@@ -27,6 +27,42 @@ MCP tool `corpus_stats` or `./mcpctl rag stats "term"`.
 Two-term statistics distinguish occurrence in the same article from
 occurrence elsewhere in the same document. Results are literal, not semantic.
 
+## Experimental native Code Mode (optional)
+
+The existing FastMCP 4.1 server can expose its registered tools through
+`search`, `get_schema` and `execute`. The last tool runs restricted Python
+in the native Monty sandbox and calls registered tools in the current request
+context. It is **not** a shell, CPython eval/exec, or a general-purpose network
+or database client. The existing tool policy and optional GSC/RAG registration
+still apply. Direct calls by known names may still work in FastMCP 4.1; discovery
+is an optimization, not an authorization boundary.
+
+To test on the existing instance (affects every client of this instance):
+
+1. Pull the dev branch, set `MCP_CODE_MODE_ENABLED=1` in the root `.env`.
+2. Run `./mcpctl mcp apply` to rebuild and recreate the MCP container, retaining
+   the active RAG/GSC overlays.
+3. Refresh the tools in the MCP client. The URL and OAuth audience remain
+   `/mcp`. No new credentials, ports or database migrations are required.
+4. Try `search` for courses, `get_schema` for `list_courses`, and `execute`
+   with a small Python program. For example:
+   ```python
+   data = await call_tool("list_courses", {"limit": 5})
+   return {"titles": [c["title"] for c in data["courses"]],
+           "complete": data["complete"]}
+   ```
+5. Roll back by setting `MCP_CODE_MODE_ENABLED=0`, applying again and refreshing
+   the client tool list.
+
+The code mode is off by default. The sandbox has explicit CPU/memory limits,
+20 tool calls per execution, a 90-second elapsed timeout, a 20,000-character
+source limit and a 100,000-byte final result limit. Cancellation of synchronous
+backend work depends on the underlying tool's own timeouts. The RAG image and
+viewer tools remain directly discoverable when enabled so their MCP content
+and UI metadata are not lost. No promise of token savings for simple calls:
+measure multi-tool tasks against classic mode. This is experimental; validate
+client behavior and isolation before using it with sensitive data.
+
 ## Private Google Search Console integration (optional, read-only)
 
 The MCP has two focused, read-only Search Console tools, **opt-in only**:
