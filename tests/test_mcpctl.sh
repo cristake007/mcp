@@ -120,4 +120,13 @@ ctl gsc disable
 [[ ! -f "$TMP/.mcp-gsc-enabled" ]]
 ctl tools list | grep 'gsc_performance.*unavailable' >/dev/null
 
+ctl tools list | grep 'get_public_html.*enabled' >/dev/null
+ctl tools list | grep 'verify_content_visibility.*unavailable' >/dev/null
+ctl browser enable
+[[ -f "$TMP/.mcp-browser-enabled" ]]
+ctl tools list | grep 'verify_content_visibility.*enabled' >/dev/null
+grep -q 'compose.browser.yaml.*up -d --build --wait browser-fetch browser-audit' "$TMP/docker.log"
+ctl browser disable
+[[ ! -f "$TMP/.mcp-browser-enabled" ]]
+grep -q 'compose.browser.yaml.*stop browser-audit browser-fetch' "$TMP/docker.log"
 echo 'PASS: Bash control harness (users, global tools, RAG/GSC opt-in, secrets)'

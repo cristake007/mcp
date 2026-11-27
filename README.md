@@ -63,6 +63,40 @@ and UI metadata are not lost. No promise of token savings for simple calls:
 measure multi-tool tasks against classic mode. This is experimental; validate
 client behavior and isolation before using it with sensitive data.
 
+## Public HTML and optional browser visibility audit
+
+`get_public_html(url, texts, max_chars=0, offset=0, force_refresh=False)`
+uses the existing fixed-host curl transport, not course REST/ACF. Matches
+include hidden source text. No browser or new service is required.
+
+Enable the optional browser with `./mcpctl browser enable` after pulling dev.
+Refresh MCP tools. `./mcpctl browser disable` stops the browser services and
+restores the previous MCP catalog. `./mcpctl mcp apply` also updates an active
+browser module. RAG, GSC and Code Mode settings are retained.
+
+- `inspect_rendered_page(url, viewport="desktop")`: bounded DOM text and headings.
+- `verify_content_visibility(url, texts, viewport="desktop")`: literal text
+  visibility with computed CSS and range geometry. Up to ten texts, one page
+  and one viewport per call. Profiles: desktop 1440x900, tablet 768x1024,
+  mobile 390x844. In Code Mode use await call_tool with these names.
+
+The renderer is isolated from database/RAG networks, has no external route,
+and uses a separate public-only HTTPS gateway. Both services have no published
+ports or host mounts; gateway rejects redirects and non-public DNS addresses.
+Chromium requests are intercepted and fulfilled from the gateway; third-party
+resources, non-GET operations, HTTP response cookies, fonts and media are
+excluded. The renderer uses the Playwright container isolation (Chromium's
+own sandbox is not enabled by default). Treat it as an experimental restricted
+browser, not an unrestricted or pixel-perfect user browser.
+
+A match is an observation in this restricted fresh session, not a universal
+visibility assertion. Critical load failure or scan truncation changes the
+verdict to indeterminate. No interaction, consent, pseudo-element, shadow DOM,
+iframe or screenshot/occlusion verification yet. External scripts and fonts
+can change real-user layout. Use individual URLs and bounded batches;
+never extrapolate a sample to an entire catalog. The browser handles one
+inspection at a time and can reject concurrent requests as busy.
+
 ## Private Google Search Console integration (optional, read-only)
 
 The MCP has two focused, read-only Search Console tools, **opt-in only**:

@@ -62,7 +62,8 @@ def configure_code_mode(server) -> None:
             "Write sandboxed Python to combine registered tools with "
             "await call_tool(name, arguments). Return only relevant results "
             "using return; preserve source references, exact quotations, "
-            "coverage flags and errors where relevant. Use search and get_schema "
+            "coverage flags and errors where relevant. Distinguish configured ACF, "
+            "public HTML and computed browser visibility. Use search and get_schema "
             "to discover tools and their return shapes. For page images and "
             "interactive RAG viewers use the directly exposed tools instead."
         ),

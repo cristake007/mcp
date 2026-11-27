@@ -1,0 +1,55 @@
+# Opt-in; renderer has only internal networks. Gateway alone has internet access.
+services:
+  mcp:
+    environment:
+      MCP_BROWSER_ENABLED: "1"
+    networks: [internal, browser_link]
+  browser-audit:
+    build:
+      context: ./browser
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    shm_size: 256m
+    mem_limit: 1g
+    pids_limit: 200
+    cpus: 1.5
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [browser_link, browser_fetch_link]
+    depends_on:
+      browser-fetch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+  browser-fetch:
+    build:
+      context: ./browser
+      dockerfile: gateway.Dockerfile
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    mem_limit: 256m
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [browser_fetch_link, browser_egress]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+networks:
+  browser_link:
+    internal: true
+  browser_fetch_link:
+    internal: true
+  browser_egress:
+    driver: bridge

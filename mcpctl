@@ -9,9 +9,10 @@ MAIN_ENV="$ROOT/.env"
 RAG_ENV="$RAG/.env"
 RAG_FLAG="$ROOT/.mcp-rag-enabled"
 GSC_FLAG="$ROOT/.mcp-gsc-enabled"
+BROWSER_FLAG="$ROOT/.mcp-browser-enabled"
 GSC_KEY_FILE="${MCP_GSC_KEY_FILE:-/etc/tuv-mcp/credentials/gsc.json}"
 cd "$ROOT"
-TOOLS=(ping whoami inspect_site search_courses list_domains list_courses get_course find_courses list_sitemaps list_site_urls get_site_text search_site seo_inspect_page gsc_performance gsc_inspect_url seo_course_queries
+TOOLS=(ping whoami inspect_site search_courses list_domains list_courses get_course find_courses list_sitemaps list_site_urls get_site_text search_site seo_inspect_page get_public_html inspect_rendered_page verify_content_visibility gsc_performance gsc_inspect_url seo_course_queries
        search_docs get_text get_document_context corpus_stats list_docs document_status
        corpus_health get_page_image show_rag_sources get_rag_page_data)
 
@@ -34,6 +35,10 @@ MCP Control — comenzi administrative (din orice director)
   ./mcpctl tools list                Starea instrumentelor
   ./mcpctl tools enable NUME         Activeaza un instrument
   ./mcpctl tools disable NUME        Dezactiveaza un instrument
+
+  ./mcpctl browser enable            Activeaza browserul izolat (optional)
+  ./mcpctl browser disable           Dezactiveaza browserul izolat
+  ./mcpctl browser status            Starea integrarii browser
 
   ./mcpctl gsc enable                Activeaza Search Console (cheie VPS read-only)
   ./mcpctl gsc disable               Dezactiveaza Search Console
@@ -149,6 +154,9 @@ mcp_compose() {
     if [[ -f "$GSC_FLAG" ]]; then
         opts+=(-f "$ROOT/compose.gsc.yaml")
     fi
+    if [[ -f "$BROWSER_FLAG" ]]; then
+        opts+=(-f "$ROOT/compose.browser.yaml")
+    fi
     docker compose "${opts[@]}" "$@"
 }
 
@@ -165,6 +173,8 @@ tool_list() {
     for tool in "${TOOLS[@]}"; do
         if is_disabled "$disabled" "$tool"; then
             state="disabled"
+        elif [[ "$tool" == "inspect_rendered_page" || "$tool" == "verify_content_visibility" ]] && [[ ! -f "$BROWSER_FLAG" ]]; then
+            state="unavailable (browser neconectat)"
         elif [[ "$tool" == "gsc_performance" || "$tool" == "gsc_inspect_url" || "$tool" == "seo_course_queries" ]] && [[ ! -f "$GSC_FLAG" ]]; then
             state="unavailable (GSC neconectat)"
         elif [[ "$tool" == "search_docs" || "$tool" == "get_text" || "$tool" == "get_document_context" || "$tool" == "corpus_stats" || "$tool" == "list_docs" || "$tool" == "document_status" || "$tool" == "corpus_health" || "$tool" == "get_page_image" || "$tool" == "show_rag_sources" || "$tool" == "get_rag_page_data" ]] && (( ! rag_state )); then
@@ -403,6 +413,43 @@ rag_command() {
     esac
 }
 
+browser_command() {
+    local action="$1"
+    shift
+    [[ $# == 0 ]] || die "browser nu accepta argumente"
+    case "$action" in
+        status)
+            if [[ -f "$BROWSER_FLAG" ]]; then info "Browser: activat"; else info "Browser: dezactivat"; fi
+            ;;
+        enable)
+            need_docker; need_main_env
+            if [[ -f "$BROWSER_FLAG" ]]; then info "Browser deja activat; foloseste mcp apply."; return; fi
+            : > "$BROWSER_FLAG"; chmod 600 "$BROWSER_FLAG"
+            if ! mcp_compose up -d --build --wait browser-fetch browser-audit ||
+               ! mcp_compose up -d --no-deps --build --force-recreate mcp; then
+                mcp_compose stop browser-audit browser-fetch || true
+                rm -f -- "$BROWSER_FLAG"
+                die "Activarea browser a esuat; markerul a fost anulat."
+            fi
+            tool_list
+            ;;
+        disable)
+            need_docker; need_main_env
+            [[ -f "$BROWSER_FLAG" ]] || { info "Browser deja dezactivat."; return; }
+            # Stop only the browser services using the still-active overlay.
+            mcp_compose stop browser-audit browser-fetch
+            rm -f -- "$BROWSER_FLAG"
+            if ! mcp_compose up -d --no-deps --force-recreate mcp; then
+                : > "$BROWSER_FLAG"; chmod 600 "$BROWSER_FLAG"
+                mcp_compose up -d --wait browser-fetch browser-audit || true
+                die "Dezactivarea browser a esuat; markerul a fost restaurat."
+            fi
+            tool_list
+            ;;
+        *) die "Comanda browser invalida.";;
+    esac
+}
+
 mcp_command() {
     local action="$1"
     shift
@@ -411,7 +458,12 @@ mcp_command() {
     case "$action" in
         start) mcp_compose up -d ;;
         stop) docker compose -f "$ROOT/compose.yaml" stop mcp ;;
-        apply) mcp_compose up -d --no-deps --build --force-recreate mcp ;;
+        apply)
+            if [[ -f "$BROWSER_FLAG" ]]; then
+                mcp_compose up -d --build --wait browser-fetch browser-audit
+            fi
+            mcp_compose up -d --no-deps --build --force-recreate mcp
+            ;;
         logs) docker compose -f "$ROOT/compose.yaml" logs -f --tail=100 mcp ;;
         *) die "Comanda mcp invalida. Foloseste: ./mcpctl help";;
     esac
@@ -436,6 +488,11 @@ main() {
                 enable|disable) [[ $# == 1 ]] || die "Utilizare: tools $action NUME"; tool_change "$action" "$1" ;;
                 *) die "Comanda tools invalida. Foloseste: ./mcpctl help";;
             esac
+            ;;
+        browser)
+            [[ $# -ge 1 ]] || die "Lipseste comanda browser."
+            action="$1"; shift
+            browser_command "$action" "$@"
             ;;
         gsc)
             [[ $# -ge 1 ]] || die "Lipseste comanda gsc."

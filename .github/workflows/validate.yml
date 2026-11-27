@@ -75,6 +75,16 @@ jobs:
         run: |
           docker compose -f compose.yaml -f compose.gsc.yaml config -q
           docker compose -f compose.yaml -f compose.rag.yaml -f compose.gsc.yaml config -q
+      - name: Validate optional browser overlay and adapters
+        env:
+          RAG_API_TOKEN: ci-bridge-long-secret-0123456789abcdef
+        run: |
+          docker compose -f compose.yaml -f compose.browser.yaml config -q
+          docker compose -f compose.yaml -f compose.rag.yaml -f compose.gsc.yaml -f compose.browser.yaml config -q
+          python -m compileall -q browser
+          python -m tests.browser_tools
+          MCP_BROWSER_ENABLED=1 python -m tests.browser_tools
+          MCP_BROWSER_ENABLED=1 MCP_CODE_MODE_ENABLED=1 python -m tests.browser_tools
       - name: Verify RAG tools are optional and preserve literal text
         run: |
           MCP_RAG_ENABLED=0 python -m tests.rag_optional
@@ -126,3 +136,17 @@ jobs:
           python -m app.manage init-db
           python -m tests.smoke
           MCP_CODE_MODE_ENABLED=1 python -m tests.smoke
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned Playwright and Chromium
+        run: |
+          python -m pip install playwright==1.56.1
+          python -m playwright install --with-deps chromium
+      - name: Real browser fixture and gateway security tests
+        run: python browser/test_visibility.py

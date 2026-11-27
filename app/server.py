@@ -87,10 +87,21 @@ RAG_RESPONSE_INSTRUCTIONS = (
     "integritatea ori diagnosticarea indexului, verifica si explica precis "
     "limitarile relevante. Nu ascunde erori reale sau incertitudini esentiale."
 )
+SITE_RESPONSE_INSTRUCTIONS = (
+    "For tuvkarpat.ro, prefer registered site tools for first-party evidence. "
+    "Course REST/ACF fields are configured content, not public display. "
+    "get_public_html checks actual HTML text presence, not CSS visibility. "
+    "If browser tools are enabled, use verify_content_visibility for display "
+    "claims; report viewport and loading limitations. Never substitute search "
+    "engine snippets or ACF for a verified rendered result. Do not infer "
+    "catalog-wide visibility from a sample; report checked and failed counts."
+)
 mcp = FastMCP(
     name="TUV Private MCP", auth=provider,
-    instructions=(RAG_RESPONSE_INSTRUCTIONS
-                  if os.environ.get("MCP_RAG_ENABLED", "0") == "1" else None),
+    instructions=SITE_RESPONSE_INSTRUCTIONS + (
+        "\n" + RAG_RESPONSE_INSTRUCTIONS
+        if os.environ.get("MCP_RAG_ENABLED", "0") == "1" else ""
+    ),
 )
 
 
@@ -157,6 +168,16 @@ from app.site_tools import list_sitemaps, list_site_urls, get_site_text, search_
 for site_tool in (list_sitemaps, list_site_urls, get_site_text, search_site):
     if tool_enabled(site_tool.__name__):
         mcp.tool()(site_tool)
+
+from app.public_html import get_public_html
+if tool_enabled("get_public_html"):
+    mcp.tool()(get_public_html)
+
+if os.environ.get("MCP_BROWSER_ENABLED", "0") == "1":
+    from app.browser_tools import inspect_rendered_page, verify_content_visibility
+    for browser_tool in (inspect_rendered_page, verify_content_visibility):
+        if tool_enabled(browser_tool.__name__):
+            mcp.tool()(browser_tool)
 
 # Public HTML metadata inspection is available without Google credentials.
 from app.seo_tools import seo_inspect_page

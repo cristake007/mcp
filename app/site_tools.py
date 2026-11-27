@@ -142,9 +142,9 @@ def get_site_text(
     expected_hash: str = "",
     force_refresh: bool = False,
 ) -> SiteText:
-    """Read source-faithful visible text from an allowlisted site URL.
+    """Read source-faithful extracted text from an allowlisted site URL.
 
-    WordPress courses return full ACF fields with source_map offsets.
+    WordPress courses return configured ACF fields with source_map offsets,\n    not public display. Use get_public_html or verify_content_visibility.
     Read all next_part fragments with the SAME max_chars and expected_hash
     to avoid silently mixing changing page versions. No JS execution.
     """
@@ -173,7 +173,7 @@ def search_site(
     match_mode: Literal["exact", "whole_word", "accent_insensitive"] = "exact",
     force_refresh: bool = False,
 ) -> SiteSearch:
-    """Search visible text on site pages, with original Unicode offsets.
+    """Search extracted source text on site pages, with original Unicode offsets.
 
     Scans at most 20 URLs per call; follow next_offset and check errors.
     For an exhaustive COURSE catalog search use find_courses instead.
