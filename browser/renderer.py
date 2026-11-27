@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
+from urllib.error import HTTPError
 from playwright.async_api import async_playwright
 
 PROFILES = {"desktop": (1440, 900), "tablet": (768, 1024), "mobile": (390, 844)}
@@ -39,10 +40,48 @@ def gateway(url):
     return data["status"], data["headers"], base64.b64decode(data["body"], validate=True)
 
 
+def resource_impact(url, kind, reason):
+    """Classify a failure in the restricted renderer, not in a full browser.
+
+    Only the exact Cloudflare JS Detections script is recognized as auxiliary.
+    Other local scripts, stylesheets and documents remain critical.
+    """
+    parsed = urlsplit(url)
+    if (kind == "script" and parsed.scheme == "https"
+            and parsed.netloc == "tuvkarpat.ro"
+            and parsed.path == "/cdn-cgi/challenge-platform/scripts/jsd/main.js"):
+        return "auxiliary_cloudflare_jsd"
+    if kind in ("document", "stylesheet", "script"):
+        if kind == "script" and reason == "outside_fixed_host":
+            return "excluded_external_script"
+        return "critical"
+    return "noncritical"
+
+
+async def challenge_document(page, response):
+    if (await response.header_value("cf-mitigated") or "").lower() == "challenge":
+        return True
+    # Fallback for an HTML challenge document without the response header.
+    # A normal page can contain JS Detections; that script alone proves nothing.
+    return await page.evaluate("""() => {
+        const title = document.title.trim().toLowerCase();
+        const marker = document.querySelector(
+            '#challenge-form, #cf-challenge-running, #cf-challenge-stage'
+        );
+        const challengeTitle = /^(just a moment|attention required|checking your browser)/.test(title);
+        const challengeScript = [...document.scripts].some(s =>
+            /\\/cdn-cgi\\/challenge-platform\\/.*\\/orchestrate\\//.test(s.src));
+        return Boolean(marker || (challengeTitle && challengeScript));
+    }""")
+
+
 async def inspect(url, texts, profile):
     width, height = PROFILES[profile]
     failures = []
-    counters = {"requests": 0, "bytes": 0, "blocked_external": 0, "critical_failures": 0}
+    counters = {"requests": 0, "bytes": 0, "blocked_external": 0,
+                "critical_failures": 0, "auxiliary_failures": 0,
+                "excluded_external_scripts": 0, "other_failures": 0}
+    main_document_failure = None
     pending = asyncio.Semaphore(8)
     async with async_playwright() as pw:
         # Container has no internet route. The dead proxy is defense in depth;
@@ -54,6 +93,7 @@ async def inspect(url, texts, profile):
                 device_scale_factor=1, is_mobile=profile=="mobile", has_touch=profile!="desktop",
                 service_workers="block", locale="ro-RO", accept_downloads=False)
             async def route_request(route):
+                nonlocal main_document_failure
                 request = route.request
                 kind = request.resource_type
                 reason = None
@@ -77,13 +117,45 @@ async def inspect(url, texts, profile):
                         else:
                             await route.fulfill(status=status, headers=headers, body=body)
                             return
+                except HTTPError as exc:
+                    reason = "fetch_failed"
+                    try:
+                        error = json.loads(exc.read(1024)).get("error", "")
+                        if error == "Cloudflare challenge response":
+                            reason = "cloudflare_challenge"
+                        elif isinstance(error, str) and error.startswith("Upstream HTTP "):
+                            code = error.removeprefix("Upstream HTTP ")
+                            if len(code) == 3 and code.isdigit():
+                                reason = "upstream_http_" + code
+                    except (ValueError, OSError, AttributeError):
+                        pass
+                    finally:
+                        exc.close()
                 except Exception:
                     reason = "fetch_failed"
-                if kind in ("document","stylesheet","script") and (reason != "outside_fixed_host" or kind != "script"):
+                impact = resource_impact(request.url, kind, reason)
+                if impact == "critical":
                     counters["critical_failures"] += 1
+                    if kind == "document" and request.url == url:
+                        main_document_failure = reason
+                elif impact == "auxiliary_cloudflare_jsd":
+                    counters["auxiliary_failures"] += 1
+                elif impact == "excluded_external_script":
+                    counters["excluded_external_scripts"] += 1
+                else:
+                    counters["other_failures"] += 1
+                warning = {"type":kind,"reason":reason,"impact":impact,
+                           "host":urlsplit(request.url).hostname or "",
+                           "path":urlsplit(request.url).path[:200]}
+                # Retain critical and auxiliary diagnostic warnings even when
+                # many skipped images or external resources fill the list.
                 if len(failures) < 20:
-                    failures.append({"type":kind,"reason":reason,
-                        "host":urlsplit(request.url).hostname or "", "path":urlsplit(request.url).path[:200]})
+                    failures.append(warning)
+                elif impact in ("critical", "auxiliary_cloudflare_jsd"):
+                    for i in range(len(failures)-1, -1, -1):
+                        if failures[i]["impact"] not in ("critical", "auxiliary_cloudflare_jsd"):
+                            failures[i] = warning
+                            break
                 try:
                     await route.abort()
                 except Exception:
@@ -97,8 +169,10 @@ async def inspect(url, texts, profile):
                 if response is None or response.status != 200 or page.url != url:
                     raise RuntimeError("Unexpected navigation response or URL")
                 await page.wait_for_timeout(750)
+                if await challenge_document(page, response):
+                    navigation_error = "cloudflare challenge document"
             except Exception:
-                navigation_error = "navigation incomplete or failed"
+                navigation_error = main_document_failure or "navigation incomplete or failed"
             if navigation_error:
                 result = {"matches":[{"text":t,"observed":"indeterminate","occurrences":0} for t in texts],
                           "scan_truncated":False,"title":"","inner_text":"","headings":[]}
@@ -114,6 +188,7 @@ async def inspect(url, texts, profile):
                     "resource_warnings":failures,"limitations":[
                         "Third-party resources, cookies from HTTP responses, non-GET requests and redirects are blocked.",
                         "Fonts and media are skipped; external scripts may change behavior in a normal browser.",
+                        "Cloudflare JS Detections script failures are auxiliary warnings only; challenge documents and other critical resource failures remain indeterminate.",
                         "No interaction, consent, scrolling, shadow DOM, iframe, pseudo-element or pixel occlusion verification.",
                         "Off-screen scrollable content can be visible in layout; matches spanning separate blocks may not be found."
                     ],**result}

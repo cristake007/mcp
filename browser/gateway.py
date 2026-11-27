@@ -65,6 +65,10 @@ def fetch(url):
             "Accept": "*/*", "Accept-Encoding": "identity", "Connection": "close",
         })
         response = connection.getresponse()
+        # A challenge response is not the requested public document or resource.
+        # Preserve that distinction; do not attempt to solve the challenge.
+        if (response.getheader("cf-mitigated") or "").strip().lower() == "challenge":
+            raise ValueError("Cloudflare challenge response")
         if 300 <= response.status < 400:
             raise ValueError("Redirects are blocked")
         if response.status != 200:

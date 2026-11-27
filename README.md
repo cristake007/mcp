@@ -91,7 +91,14 @@ browser, not an unrestricted or pixel-perfect user browser.
 
 A match is an observation in this restricted fresh session, not a universal
 visibility assertion. Critical load failure or scan truncation changes the
-verdict to indeterminate. No interaction, consent, pseudo-element, shadow DOM,
+verdict to indeterminate. A failed request for the exact same-host Cloudflare
+JavaScript Detections script is reported as an auxiliary warning and does not
+by itself invalidate a result. Challenge documents (including the
+`cf-mitigated: challenge` response) remain indeterminate; no challenge is
+solved or bypassed. Other missing same-host scripts and CSS remain critical.
+Resource counters distinguish auxiliary, critical and excluded external
+scripts; failure diagnostics expose bounded status/reason without response
+bodies or cookies. No interaction, consent, pseudo-element, shadow DOM,
 iframe or screenshot/occlusion verification yet. External scripts and fonts
 can change real-user layout. Use individual URLs and bounded batches;
 never extrapolate a sample to an entire catalog. The browser handles one
