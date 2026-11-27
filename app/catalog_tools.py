@@ -4,7 +4,9 @@ The public contract does not expose a polymorphic "action" parameter.
 The legacy search_courses action interface remains available while existing
 clients migrate; both routes call the same catalog/search implementations.
 """
-from typing import Literal, NotRequired, TypedDict
+from typing import Annotated, Literal, NotRequired, TypedDict
+
+from pydantic import Field
 
 from app import course_catalog as catalog
 from app import course_search_service as engine
@@ -74,15 +76,17 @@ def list_domains(force_refresh: bool = False) -> DomainListing:
 @site.refresh_scope
 def list_courses(
     domain: str | int | None = None,
-    offset: int = 0,
-    limit: int = 25,
+    offset: Annotated[int, Field(ge=0, strict=True, description="Non-negative pagination offset; start at 0, then use next_offset.")] = 0,
+    limit: Annotated[int, Field(ge=1, le=100, strict=True, description="Page size, 1..100 inclusive; never exceed 100.")] = 25,
     force_refresh: bool = False,
 ) -> CourseListing:
     """List published WordPress courses, optionally restricted by real taxonomy.
 
     Pagination applies to the verified catalog, not to partial REST pages.
     complete=false and missing_courses_count signal source inconsistencies.
-    Follow next_offset to traverse the entire list.
+    limit must be 1..100 inclusive; for the whole catalog use limit=100,
+    offset=0, then repeat with the returned next_offset until it is null.
+    Never pass total_courses as limit. Check complete and errors separately.
     """
     if type(offset) is not int or offset < 0:
         raise ValueError("offset must be a non-negative integer")

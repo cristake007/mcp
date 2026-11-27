@@ -77,6 +77,28 @@ class CatalogToolsTests(unittest.TestCase):
         self.assertNotIn("action", tools["list_courses"].parameters["properties"])
         self.assertNotIn("action", tools["get_course"].parameters["properties"])
         self.assertIn("courses", tools["list_courses"].output_schema["required"])
+        properties = tools["list_courses"].parameters["properties"]
+        self.assertEqual(properties["limit"]["minimum"], 1)
+        self.assertEqual(properties["limit"]["maximum"], 100)
+        self.assertEqual(properties["limit"]["default"], 25)
+        self.assertEqual(properties["offset"]["minimum"], 0)
+
+    def test_full_catalog_uses_multiple_bounded_pages(self):
+        items = [{"id": n, "slug": str(n), "url": f"https://tuvkarpat.ro/cursuri/{n}/",
+                  "title": f"Course {n}", "domenii": []} for n in range(1, 196)]
+        response = {"total_courses": len(items), "courses": items, "complete": True,
+                    "missing_courses_count": 0, "errors": []}
+        with patch.object(catalog_tools.engine, "list_catalog_courses", return_value=response):
+            offset = 0
+            seen = []
+            page_sizes = []
+            while offset is not None:
+                page = catalog_tools.list_courses(offset=offset, limit=100)
+                seen.extend(c["id"] for c in page["courses"])
+                page_sizes.append(page["returned"])
+                offset = page["next_offset"]
+        self.assertEqual(page_sizes, [100, 95])
+        self.assertEqual(seen, list(range(1, 196)))
 
 
 if __name__ == "__main__":

@@ -35,6 +35,10 @@ async def main():
 
     schemas = await mcp.call_tool("get_schema", {"tools": ["list_courses"]})
     assert "list_courses" in str(schemas) and "offset" in str(schemas)
+    assert "1..100" in str(schemas) and "next_offset" in str(schemas), schemas
+    full = await mcp.call_tool("get_schema", {"tools": ["list_courses"], "detail": "full"})
+    full_text = str(full)
+    assert "maximum" in full_text and "100" in full_text and "minimum" in full_text, full
     found = await mcp.call_tool("search", {"query": "WordPress courses"})
     assert "courses" in str(found)
 
